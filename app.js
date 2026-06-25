@@ -48,9 +48,11 @@ function saveLocal() {
 const wToDb = w => ({ id: w.id, name: w.name, role: w.role || '', color: w.color });
 const wFromDb = r => ({ id: r.id, name: r.name, role: r.role || '', color: r.color });
 const aToDb = a => ({ id: a.id, worker_id: a.workerId, title: a.title, objective: a.objective || '',
-  priority: a.priority, status: a.status, progress: a.progress, due: a.due || null, created_at: a.createdAt || null });
+  priority: a.priority, status: a.status, progress: a.progress, due: a.due || null, created_at: a.createdAt || null,
+  subtasks: a.subtasks || [] });
 const aFromDb = r => ({ id: r.id, workerId: r.worker_id, title: r.title, objective: r.objective || '',
-  priority: r.priority, status: r.status, progress: r.progress, due: r.due || '', createdAt: r.created_at || '' });
+  priority: r.priority, status: r.status, progress: r.progress, due: r.due || '', createdAt: r.created_at || '',
+  subtasks: Array.isArray(r.subtasks) ? r.subtasks : [] });
 
 /* ---------- Adaptador de datos: nube o local según configuración ---------- */
 const DB = {
@@ -142,6 +144,25 @@ function effectiveStatus(a) {
 
 function workerById(id) { return state.workers.find(w => w.id === id); }
 function activitiesOf(id) { return state.activities.filter(a => a.workerId === id); }
+
+/* ---------- Subactividades ----------
+   Cada subactividad tiene { id, title, weight, done }.
+   El progreso de la actividad principal se calcula con la suma de pesos
+   completados sobre el peso total (las subactividades "abonan" a la tarea). */
+function subStats(a) {
+  const subs = a.subtasks || [];
+  const totalW = subs.reduce((s, t) => s + (Number(t.weight) || 1), 0);
+  const doneW = subs.reduce((s, t) => s + (t.done ? (Number(t.weight) || 1) : 0), 0);
+  return { count: subs.length, doneCount: subs.filter(t => t.done).length,
+    pct: totalW ? Math.round(doneW / totalW * 100) : 0, totalW, doneW };
+}
+// Si hay subactividades, el progreso y el estado se derivan de ellas.
+function syncFromSubtasks(a) {
+  if (a.subtasks && a.subtasks.length) {
+    a.progress = subStats(a).pct;
+    a.status = a.progress >= 100 ? 'cumplida' : a.progress > 0 ? 'en_progreso' : 'pendiente';
+  }
+}
 
 function workerScore(id) {
   const acts = activitiesOf(id);
@@ -266,6 +287,7 @@ function taskRow(a) {
       <div class="task-sub">
         <span>${w ? escapeHtml(w.name) : 'Sin asignar'}</span>
         <span>📅 ${fmtDate(a.due)}</span>
+        ${a.subtasks && a.subtasks.length ? `<span>☑️ ${subStats(a).doneCount}/${a.subtasks.length} subactividades</span>` : ''}
       </div>
     </div>
     <div class="task-right">
@@ -408,7 +430,9 @@ function workerForm(worker) {
 /* ----- Activity form ----- */
 function activityForm(activity, presetWorker) {
   if (!state.workers.length) { toast('Primero agrega un trabajador', true); return; }
-  const a = activity || { title:'', objective:'', priority:'media', status:'pendiente', progress:0, due:'', workerId: presetWorker || state.workers[0].id };
+  const a = activity || { title:'', objective:'', priority:'media', status:'pendiente', progress:0, due:'', subtasks:[], workerId: presetWorker || state.workers[0].id };
+  // copia de trabajo de las subactividades (no toca el original hasta Guardar)
+  let subs = (a.subtasks || []).map(t => ({ id: t.id || uid(), title: t.title || '', weight: Number(t.weight) || 1, done: !!t.done }));
   openModal(activity ? 'Editar actividad' : 'Nueva actividad', `
     <div class="field">
       <label>Actividad / tarea *</label>
@@ -443,10 +467,19 @@ function activityForm(activity, presetWorker) {
       </div>
     </div>
     <div class="field">
-      <label>Progreso</label>
-      <div class="range-row">
+      <label>Subactividades <span class="muted" style="font-weight:400">— opcional, abonan al progreso según su peso</span></label>
+      <div id="f-subs" class="subs"></div>
+      <button type="button" class="btn ghost" id="f-sub-add" style="margin-top:8px;font-size:13px;padding:7px 12px">+ Agregar subactividad</button>
+    </div>
+    <div class="field">
+      <label id="f-progress-label">Progreso</label>
+      <div class="range-row" id="f-manual-row">
         <input type="range" id="f-progress" min="0" max="100" step="5" value="${a.progress}" />
         <span class="range-val" id="f-progress-val">${a.progress}%</span>
+      </div>
+      <div class="range-row hidden" id="f-auto-row">
+        <div class="bar" style="flex:1"><span id="f-auto-bar"></span></div>
+        <span class="range-val" id="f-auto-val"></span>
       </div>
     </div>
     <div class="modal-actions">
@@ -470,10 +503,64 @@ function activityForm(activity, presetWorker) {
     if (statusSel.value === 'cumplida') { range.value = 100; rangeVal.textContent = '100%'; }
   };
 
+  // ----- Editor de subactividades -----
+  const subsCont = document.getElementById('f-subs');
+  function updateAuto() {
+    const hasSubs = subs.length > 0;
+    const st = subStats({ subtasks: subs });
+    document.getElementById('f-manual-row').classList.toggle('hidden', hasSubs);
+    document.getElementById('f-auto-row').classList.toggle('hidden', !hasSubs);
+    statusSel.disabled = hasSubs;
+    range.disabled = hasSubs;
+    document.getElementById('f-progress-label').textContent =
+      hasSubs ? `Progreso (automático): ${st.pct}% · ${st.doneCount}/${st.count} subactividades` : 'Progreso';
+    if (hasSubs) {
+      const bar = document.getElementById('f-auto-bar');
+      bar.style.width = st.pct + '%';
+      bar.style.background = barColor(st.pct);
+      document.getElementById('f-auto-val').textContent = st.pct + '%';
+      statusSel.value = st.pct >= 100 ? 'cumplida' : st.pct > 0 ? 'en_progreso' : 'pendiente';
+    }
+  }
+  function renderSubs() {
+    subsCont.innerHTML = subs.map((t, i) => `
+      <div class="sub-row" data-idx="${i}">
+        <input type="checkbox" class="sub-done" ${t.done ? 'checked' : ''} title="Marcar como completada" />
+        <input type="text" class="sub-title" value="${escapeHtml(t.title)}" placeholder="Ej. Excavar zanja" />
+        <input type="number" class="sub-weight" min="1" step="1" value="${t.weight}" title="Peso (importancia)" />
+        <button type="button" class="icon-btn sub-del" title="Quitar">✕</button>
+      </div>`).join('');
+    updateAuto();
+  }
+  subsCont.addEventListener('input', e => {
+    const row = e.target.closest('.sub-row'); if (!row) return;
+    const i = +row.dataset.idx;
+    if (e.target.classList.contains('sub-title')) subs[i].title = e.target.value;
+    else if (e.target.classList.contains('sub-weight')) { subs[i].weight = Math.max(1, parseInt(e.target.value || '1', 10)); updateAuto(); }
+  });
+  subsCont.addEventListener('change', e => {
+    const row = e.target.closest('.sub-row'); if (!row) return;
+    if (e.target.classList.contains('sub-done')) { subs[+row.dataset.idx].done = e.target.checked; updateAuto(); }
+  });
+  subsCont.addEventListener('click', e => {
+    if (!e.target.classList.contains('sub-del')) return;
+    subs.splice(+e.target.closest('.sub-row').dataset.idx, 1); renderSubs();
+  });
+  document.getElementById('f-sub-add').onclick = () => {
+    subs.push({ id: uid(), title: '', weight: 1, done: false });
+    renderSubs();
+    const last = subsCont.querySelector('.sub-row:last-child .sub-title');
+    if (last) last.focus();
+  };
+  renderSubs();
+
   document.getElementById('f-cancel').onclick = closeModal;
   document.getElementById('f-save').onclick = async () => {
     const title = document.getElementById('f-title').value.trim();
     if (!title) return toast('El nombre de la actividad es obligatorio', true);
+    const cleanSubs = subs
+      .map(t => ({ id: t.id, title: t.title.trim(), weight: Math.max(1, Number(t.weight) || 1), done: !!t.done }))
+      .filter(t => t.title);
     const data = {
       title,
       objective: document.getElementById('f-obj').value.trim(),
@@ -482,10 +569,12 @@ function activityForm(activity, presetWorker) {
       status: statusSel.value,
       due: document.getElementById('f-due').value,
       progress: statusSel.value === 'cumplida' ? 100 : parseInt(range.value, 10),
+      subtasks: cleanSubs,
     };
     let a;
     if (activity) { Object.assign(activity, data); a = activity; }
     else { a = { id: uid(), createdAt: new Date().toISOString().slice(0,10), ...data }; state.activities.push(a); }
+    syncFromSubtasks(a); // si hay subactividades, recalcula progreso y estado
     try {
       await DB.saveActivity(a);
       closeModal(); renderAll(); toast('Actividad guardada');

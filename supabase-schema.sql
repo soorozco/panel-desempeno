@@ -22,8 +22,12 @@ create table if not exists public.activities (
   status      text default 'pendiente', -- pendiente | en_progreso | cumplida
   progress    int  default 0,         -- 0..100
   due         text,                   -- fecha límite 'YYYY-MM-DD' (puede ser nula)
-  created_at  text                    -- fecha de creación 'YYYY-MM-DD'
+  created_at  text,                   -- fecha de creación 'YYYY-MM-DD'
+  subtasks    jsonb default '[]'::jsonb -- subactividades: [{id,title,weight,done}]
 );
+
+-- Si la tabla ya existía sin la columna subtasks, esto la agrega:
+alter table public.activities add column if not exists subtasks jsonb default '[]'::jsonb;
 
 create index if not exists activities_worker_idx on public.activities(worker_id);
 
