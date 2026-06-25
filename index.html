@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Panel de Desempeño — Seguimiento de Trabajadores</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-logo">CIVIL</div>
+      <div class="brand-text">
+        <h1>Panel de Desempeño</h1>
+        <span>Seguimiento de actividades y objetivos</span>
+      </div>
+    </div>
+    <nav class="tabs">
+      <button class="tab active" data-view="dashboard">Resumen</button>
+      <button class="tab" data-view="workers">Trabajadores</button>
+      <button class="tab" data-view="activities">Actividades</button>
+    </nav>
+    <div class="topbar-actions">
+      <span id="userEmail" class="user-pill hidden"></span>
+      <button id="btnTheme" class="btn ghost" title="Cambiar tema claro/oscuro">🌙</button>
+      <button id="btnExport" class="btn ghost" title="Descargar respaldo">⬇ Respaldo</button>
+      <button id="btnImport" class="btn ghost" title="Cargar respaldo">⬆ Importar</button>
+      <button id="btnLogout" class="btn ghost hidden" title="Cerrar sesión">Salir</button>
+      <input type="file" id="fileImport" accept="application/json" hidden />
+    </div>
+  </header>
+
+  <main class="container">
+
+    <!-- ============ RESUMEN ============ -->
+    <section id="view-dashboard" class="view">
+      <div class="stats-grid" id="statsGrid"></div>
+
+      <div class="panel-row">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Cumplimiento por trabajador</h2>
+          </div>
+          <div id="workerPerformance" class="perf-list"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Estado general de actividades</h2>
+          </div>
+          <div class="donut-wrap">
+            <div id="donutChart"></div>
+            <div id="donutLegend" class="legend"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>⚠ Pendientes y atrasadas</h2>
+          <span class="muted" id="pendingCount"></span>
+        </div>
+        <div id="pendingList" class="task-list"></div>
+      </div>
+    </section>
+
+    <!-- ============ TRABAJADORES ============ -->
+    <section id="view-workers" class="view hidden">
+      <div class="view-head">
+        <h2>Trabajadores</h2>
+        <button id="btnAddWorker" class="btn primary">+ Nuevo trabajador</button>
+      </div>
+      <div id="workersGrid" class="workers-grid"></div>
+    </section>
+
+    <!-- ============ ACTIVIDADES ============ -->
+    <section id="view-activities" class="view hidden">
+      <div class="view-head">
+        <h2>Actividades</h2>
+        <button id="btnAddActivity" class="btn primary">+ Nueva actividad</button>
+      </div>
+      <div class="filters">
+        <select id="filterWorker"><option value="">Todos los trabajadores</option></select>
+        <select id="filterStatus">
+          <option value="">Todos los estados</option>
+          <option value="pendiente">Pendiente</option>
+          <option value="en_progreso">En progreso</option>
+          <option value="cumplida">Cumplida</option>
+        </select>
+        <input type="search" id="filterSearch" placeholder="Buscar actividad u objetivo…" />
+      </div>
+      <div id="activitiesList" class="task-list"></div>
+    </section>
+
+  </main>
+
+  <!-- ============ MODAL ============ -->
+  <div id="modal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-head">
+        <h3 id="modalTitle">Título</h3>
+        <button id="modalClose" class="icon-btn">✕</button>
+      </div>
+      <div id="modalBody" class="modal-body"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <!-- ============ LOGIN ============ -->
+  <div id="loginOverlay" class="login-overlay hidden">
+    <form id="loginForm" class="login-card">
+      <div class="brand-logo" style="margin:0 auto 16px">CIVIL</div>
+      <h2>Iniciar sesión</h2>
+      <p class="muted" style="margin-bottom:20px">Panel de Desempeño</p>
+      <div class="field">
+        <label>Correo</label>
+        <input type="email" id="loginEmail" placeholder="tu@correo.com" required autocomplete="username" />
+      </div>
+      <div class="field">
+        <label>Contraseña</label>
+        <input type="password" id="loginPass" placeholder="••••••••" required autocomplete="current-password" />
+      </div>
+      <div id="loginError" class="login-error hidden"></div>
+      <button class="btn primary" type="submit" id="loginBtn" style="width:100%;margin-top:6px">Entrar</button>
+      <p class="muted" style="margin-top:16px;font-size:12px;text-align:center">El acceso lo crea el administrador en Supabase.</p>
+    </form>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
