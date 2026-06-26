@@ -29,6 +29,17 @@ initTheme();
 /* ---------- Supabase (modo nube) ---------- */
 const CLOUD = !!(window.SUPABASE_URL && window.SUPABASE_ANON_KEY && window.supabase);
 const SUPA = CLOUD ? window.supabase.createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY) : null;
+const BUCKET = 'evidencias';                 // bucket de Supabase Storage para los archivos
+const LOCAL_FILE_MAX = 2 * 1024 * 1024;      // en modo local, tope de 2 MB por archivo (localStorage)
+
+function fileToDataUrl(file) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result);
+    r.onerror = rej;
+    r.readAsDataURL(file);
+  });
+}
 
 /* ---------- Estado ---------- */
 let state = { workers: [], activities: [] };
@@ -49,10 +60,10 @@ const wToDb = w => ({ id: w.id, name: w.name, role: w.role || '', color: w.color
 const wFromDb = r => ({ id: r.id, name: r.name, role: r.role || '', color: r.color });
 const aToDb = a => ({ id: a.id, worker_id: a.workerId, title: a.title, objective: a.objective || '',
   priority: a.priority, status: a.status, progress: a.progress, due: a.due || null, created_at: a.createdAt || null,
-  subtasks: a.subtasks || [] });
+  subtasks: a.subtasks || [], attachments: a.attachments || [] });
 const aFromDb = r => ({ id: r.id, workerId: r.worker_id, title: r.title, objective: r.objective || '',
   priority: r.priority, status: r.status, progress: r.progress, due: r.due || '', createdAt: r.created_at || '',
-  subtasks: Array.isArray(r.subtasks) ? r.subtasks : [] });
+  subtasks: Array.isArray(r.subtasks) ? r.subtasks : [], attachments: Array.isArray(r.attachments) ? r.attachments : [] });
 
 /* ---------- Adaptador de datos: nube o local según configuración ---------- */
 const DB = {
@@ -87,6 +98,34 @@ const DB = {
     if (!CLOUD) return saveLocal();
     const { error } = await SUPA.from('activities').delete().eq('id', id);
     if (error) throw error;
+  },
+
+  /* ----- Archivos (evidencia) ----- */
+  async uploadAttachment(activityId, file) {
+    const id = uid();
+    const meta = { id, name: file.name, type: file.type || '', size: file.size,
+      uploadedAt: new Date().toISOString().slice(0, 10) };
+    if (!CLOUD) {
+      if (file.size > LOCAL_FILE_MAX) throw new Error('En modo local el archivo no puede pasar de 2 MB.');
+      meta.dataUrl = await fileToDataUrl(file);
+      return meta;
+    }
+    meta.path = `${activityId}/${id}-${file.name}`;
+    const { error } = await SUPA.storage.from(BUCKET).upload(meta.path, file, { upsert: false });
+    if (error) throw error;
+    return meta;
+  },
+  async removeAttachment(att) {
+    if (!CLOUD || !att.path) return;
+    const { error } = await SUPA.storage.from(BUCKET).remove([att.path]);
+    if (error) throw error;
+  },
+  async attachmentUrl(att) {
+    if (att.dataUrl) return att.dataUrl;       // modo local
+    if (!CLOUD || !att.path) return null;
+    const { data, error } = await SUPA.storage.from(BUCKET).createSignedUrl(att.path, 3600);
+    if (error) throw error;
+    return data.signedUrl;
   },
   async replaceAll(data) {
     if (!CLOUD) { state = data; saveLocal(); return; }
@@ -288,6 +327,7 @@ function taskRow(a) {
         <span>${w ? escapeHtml(w.name) : 'Sin asignar'}</span>
         <span>📅 ${fmtDate(a.due)}</span>
         ${a.subtasks && a.subtasks.length ? `<span>☑️ ${subStats(a).doneCount}/${a.subtasks.length} subactividades</span>` : ''}
+        ${a.attachments && a.attachments.length ? `<span>📎 ${a.attachments.length} archivo(s)</span>` : ''}
       </div>
     </div>
     <div class="task-right">
@@ -430,9 +470,11 @@ function workerForm(worker) {
 /* ----- Activity form ----- */
 function activityForm(activity, presetWorker) {
   if (!state.workers.length) { toast('Primero agrega un trabajador', true); return; }
-  const a = activity || { title:'', objective:'', priority:'media', status:'pendiente', progress:0, due:'', subtasks:[], workerId: presetWorker || state.workers[0].id };
-  // copia de trabajo de las subactividades (no toca el original hasta Guardar)
+  const a = activity || { title:'', objective:'', priority:'media', status:'pendiente', progress:0, due:'', subtasks:[], attachments:[], workerId: presetWorker || state.workers[0].id };
+  const formActId = activity ? activity.id : uid(); // id fijo para rutas de archivos, aun en alta nueva
+  // copias de trabajo (no tocan el original hasta Guardar)
   let subs = (a.subtasks || []).map(t => ({ id: t.id || uid(), title: t.title || '', weight: Number(t.weight) || 1, done: !!t.done }));
+  let atts = (a.attachments || []).map(x => ({ ...x }));
   openModal(activity ? 'Editar actividad' : 'Nueva actividad', `
     <div class="field">
       <label>Actividad / tarea *</label>
@@ -481,6 +523,15 @@ function activityForm(activity, presetWorker) {
         <div class="bar" style="flex:1"><span id="f-auto-bar"></span></div>
         <span class="range-val" id="f-auto-val"></span>
       </div>
+    </div>
+    <div class="field">
+      <label>Evidencia / archivos <span class="muted" style="font-weight:400">— fotos, PDF, planos…</span></label>
+      <div id="f-atts" class="atts"></div>
+      <label class="btn ghost" id="f-att-label" style="margin-top:8px;font-size:13px;padding:7px 12px;display:inline-block;cursor:pointer">
+        📎 Adjuntar archivo
+        <input type="file" id="f-att-input" multiple hidden />
+      </label>
+      <span id="f-att-status" class="muted" style="margin-left:8px"></span>
     </div>
     <div class="modal-actions">
       ${activity ? `<button class="btn danger" id="f-del">Eliminar</button>` : '<span></span>'}
@@ -554,6 +605,59 @@ function activityForm(activity, presetWorker) {
   };
   renderSubs();
 
+  // ----- Editor de archivos (evidencia) -----
+  const attsCont = document.getElementById('f-atts');
+  const attStatus = document.getElementById('f-att-status');
+  function fmtSize(b) {
+    if (b == null) return '';
+    if (b < 1024) return b + ' B';
+    if (b < 1024 * 1024) return (b / 1024).toFixed(0) + ' KB';
+    return (b / 1024 / 1024).toFixed(1) + ' MB';
+  }
+  function attIcon(t) {
+    if ((t || '').startsWith('image/')) return '🖼️';
+    if ((t || '').includes('pdf')) return '📄';
+    return '📎';
+  }
+  function renderAtts() {
+    attsCont.innerHTML = atts.map((x, i) => `
+      <div class="att-row" data-idx="${i}">
+        <span class="att-ic">${attIcon(x.type)}</span>
+        <span class="att-name" title="${escapeHtml(x.name)}">${escapeHtml(x.name)}</span>
+        <span class="att-size">${fmtSize(x.size)}</span>
+        <button type="button" class="btn ghost att-view" style="padding:4px 10px;font-size:12px">Ver</button>
+        <button type="button" class="icon-btn att-del" title="Quitar">✕</button>
+      </div>`).join('');
+  }
+  attsCont.addEventListener('click', async e => {
+    const row = e.target.closest('.att-row'); if (!row) return;
+    const i = +row.dataset.idx;
+    if (e.target.classList.contains('att-view')) {
+      try {
+        const url = await DB.attachmentUrl(atts[i]);
+        if (url) window.open(url, '_blank'); else toast('No se pudo abrir el archivo', true);
+      } catch (err) { toast('Error al abrir: ' + (err.message || err), true); }
+    } else if (e.target.classList.contains('att-del')) {
+      if (!confirm('¿Quitar este archivo?')) return;
+      const att = atts[i];
+      try { await DB.removeAttachment(att); atts.splice(i, 1); renderAtts(); }
+      catch (err) { toast('Error al quitar: ' + (err.message || err), true); }
+    }
+  });
+  document.getElementById('f-att-input').onchange = async (e) => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = '';
+    for (const file of files) {
+      attStatus.textContent = `Subiendo ${file.name}…`;
+      try {
+        const meta = await DB.uploadAttachment(formActId, file);
+        atts.push(meta); renderAtts();
+      } catch (err) { toast('Error al subir ' + file.name + ': ' + (err.message || err), true); }
+    }
+    attStatus.textContent = '';
+  };
+  renderAtts();
+
   document.getElementById('f-cancel').onclick = closeModal;
   document.getElementById('f-save').onclick = async () => {
     const title = document.getElementById('f-title').value.trim();
@@ -570,10 +674,11 @@ function activityForm(activity, presetWorker) {
       due: document.getElementById('f-due').value,
       progress: statusSel.value === 'cumplida' ? 100 : parseInt(range.value, 10),
       subtasks: cleanSubs,
+      attachments: atts,
     };
     let a;
     if (activity) { Object.assign(activity, data); a = activity; }
-    else { a = { id: uid(), createdAt: new Date().toISOString().slice(0,10), ...data }; state.activities.push(a); }
+    else { a = { id: formActId, createdAt: new Date().toISOString().slice(0,10), ...data }; state.activities.push(a); }
     syncFromSubtasks(a); // si hay subactividades, recalcula progreso y estado
     try {
       await DB.saveActivity(a);
@@ -585,6 +690,8 @@ function activityForm(activity, presetWorker) {
       if (!confirm('¿Eliminar esta actividad?')) return;
       state.activities = state.activities.filter(x => x.id !== activity.id);
       try {
+        // borra también los archivos de evidencia (mejor esfuerzo)
+        for (const att of (activity.attachments || [])) { try { await DB.removeAttachment(att); } catch (_) {} }
         await DB.deleteActivity(activity.id);
         closeModal(); renderAll(); toast('Actividad eliminada');
       } catch (e) { toast('Error al eliminar: ' + (e.message || e), true); }

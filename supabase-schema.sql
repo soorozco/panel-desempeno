@@ -22,12 +22,32 @@ create table if not exists public.activities (
   status      text default 'pendiente', -- pendiente | en_progreso | cumplida
   progress    int  default 0,         -- 0..100
   due         text,                   -- fecha límite 'YYYY-MM-DD' (puede ser nula)
-  created_at  text,                   -- fecha de creación 'YYYY-MM-DD'
-  subtasks    jsonb default '[]'::jsonb -- subactividades: [{id,title,weight,done}]
+  created_at  text,                    -- fecha de creación 'YYYY-MM-DD'
+  subtasks    jsonb default '[]'::jsonb, -- subactividades: [{id,title,weight,done}]
+  attachments jsonb default '[]'::jsonb  -- archivos: [{id,name,type,size,path,uploadedAt}]
 );
 
--- Si la tabla ya existía sin la columna subtasks, esto la agrega:
-alter table public.activities add column if not exists subtasks jsonb default '[]'::jsonb;
+-- Si la tabla ya existía sin estas columnas, esto las agrega:
+alter table public.activities add column if not exists subtasks    jsonb default '[]'::jsonb;
+alter table public.activities add column if not exists attachments jsonb default '[]'::jsonb;
+
+-- ---------- Almacenamiento de archivos (evidencia) ----------
+insert into storage.buckets (id, name, public)
+values ('evidencias', 'evidencias', false)
+on conflict (id) do nothing;
+
+drop policy if exists "evidencias_select" on storage.objects;
+create policy "evidencias_select" on storage.objects
+  for select to authenticated using (bucket_id = 'evidencias');
+drop policy if exists "evidencias_insert" on storage.objects;
+create policy "evidencias_insert" on storage.objects
+  for insert to authenticated with check (bucket_id = 'evidencias');
+drop policy if exists "evidencias_update" on storage.objects;
+create policy "evidencias_update" on storage.objects
+  for update to authenticated using (bucket_id = 'evidencias');
+drop policy if exists "evidencias_delete" on storage.objects;
+create policy "evidencias_delete" on storage.objects
+  for delete to authenticated using (bucket_id = 'evidencias');
 
 create index if not exists activities_worker_idx on public.activities(worker_id);
 

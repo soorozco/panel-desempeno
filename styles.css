@@ -248,6 +248,17 @@ body {
 .sub-row .sub-del { font-size: 14px; }
 .sub-row .sub-del:hover { color: var(--red); }
 
+/* ---------- Archivos adjuntos ---------- */
+.atts { display: flex; flex-direction: column; gap: 8px; }
+.att-row {
+  display: grid; grid-template-columns: auto 1fr auto auto auto; gap: 10px; align-items: center;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+}
+.att-ic { font-size: 18px; }
+.att-name { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.att-size { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.att-row .att-del:hover { color: var(--red); }
+
 /* ---------- Detail ---------- */
 .detail-head { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
 .detail-stats { display: flex; gap: 18px; margin-bottom: 18px; }
