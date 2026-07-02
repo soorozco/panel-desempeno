@@ -473,7 +473,7 @@ function activityForm(activity, presetWorker) {
   const a = activity || { title:'', objective:'', priority:'media', status:'pendiente', progress:0, due:'', subtasks:[], attachments:[], workerId: presetWorker || state.workers[0].id };
   const formActId = activity ? activity.id : uid(); // id fijo para rutas de archivos, aun en alta nueva
   // copias de trabajo (no tocan el original hasta Guardar)
-  let subs = (a.subtasks || []).map(t => ({ id: t.id || uid(), title: t.title || '', weight: Number(t.weight) || 1, done: !!t.done }));
+  let subs = (a.subtasks || []).map(t => ({ id: t.id || uid(), title: t.title || '', weight: Number(t.weight) || 1, done: !!t.done, due: t.due || '' }));
   let atts = (a.attachments || []).map(x => ({ ...x }));
   openModal(activity ? 'Editar actividad' : 'Nueva actividad', `
     <div class="field">
@@ -574,13 +574,21 @@ function activityForm(activity, presetWorker) {
     }
   }
   function renderSubs() {
-    subsCont.innerHTML = subs.map((t, i) => `
+    subsCont.innerHTML = subs.map((t, i) => {
+      const overdue = t.due && !t.done && new Date(t.due) < today0();
+      return `
       <div class="sub-row" data-idx="${i}">
-        <input type="checkbox" class="sub-done" ${t.done ? 'checked' : ''} title="Marcar como completada" />
-        <input type="text" class="sub-title" value="${escapeHtml(t.title)}" placeholder="Ej. Excavar zanja" />
-        <input type="number" class="sub-weight" min="1" step="1" value="${t.weight}" title="Peso (importancia)" />
-        <button type="button" class="icon-btn sub-del" title="Quitar">✕</button>
-      </div>`).join('');
+        <div class="sub-line1">
+          <input type="checkbox" class="sub-done" ${t.done ? 'checked' : ''} title="Marcar como completada" />
+          <input type="text" class="sub-title" value="${escapeHtml(t.title)}" placeholder="Ej. Excavar zanja" />
+          <button type="button" class="icon-btn sub-del" title="Quitar">✕</button>
+        </div>
+        <div class="sub-line2">
+          <label class="sub-field ${overdue ? 'overdue' : ''}">📅 <input type="date" class="sub-due" value="${t.due || ''}" title="Fecha de esta subactividad" /></label>
+          <label class="sub-field">Peso <input type="number" class="sub-weight" min="1" step="1" value="${t.weight}" title="Peso (importancia)" /></label>
+        </div>
+      </div>`;
+    }).join('');
     updateAuto();
   }
   subsCont.addEventListener('input', e => {
@@ -588,17 +596,20 @@ function activityForm(activity, presetWorker) {
     const i = +row.dataset.idx;
     if (e.target.classList.contains('sub-title')) subs[i].title = e.target.value;
     else if (e.target.classList.contains('sub-weight')) { subs[i].weight = Math.max(1, parseInt(e.target.value || '1', 10)); updateAuto(); }
+    else if (e.target.classList.contains('sub-due')) subs[i].due = e.target.value;
   });
   subsCont.addEventListener('change', e => {
     const row = e.target.closest('.sub-row'); if (!row) return;
-    if (e.target.classList.contains('sub-done')) { subs[+row.dataset.idx].done = e.target.checked; updateAuto(); }
+    const i = +row.dataset.idx;
+    if (e.target.classList.contains('sub-done')) { subs[i].done = e.target.checked; renderSubs(); }
+    else if (e.target.classList.contains('sub-due')) { subs[i].due = e.target.value; renderSubs(); }
   });
   subsCont.addEventListener('click', e => {
     if (!e.target.classList.contains('sub-del')) return;
     subs.splice(+e.target.closest('.sub-row').dataset.idx, 1); renderSubs();
   });
   document.getElementById('f-sub-add').onclick = () => {
-    subs.push({ id: uid(), title: '', weight: 1, done: false });
+    subs.push({ id: uid(), title: '', weight: 1, done: false, due: '' });
     renderSubs();
     const last = subsCont.querySelector('.sub-row:last-child .sub-title');
     if (last) last.focus();
@@ -663,7 +674,7 @@ function activityForm(activity, presetWorker) {
     const title = document.getElementById('f-title').value.trim();
     if (!title) return toast('El nombre de la actividad es obligatorio', true);
     const cleanSubs = subs
-      .map(t => ({ id: t.id, title: t.title.trim(), weight: Math.max(1, Number(t.weight) || 1), done: !!t.done }))
+      .map(t => ({ id: t.id, title: t.title.trim(), weight: Math.max(1, Number(t.weight) || 1), done: !!t.done, due: t.due || '' }))
       .filter(t => t.title);
     const data = {
       title,

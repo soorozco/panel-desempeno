@@ -235,17 +235,22 @@ body {
 /* ---------- Subactividades ---------- */
 .subs { display: flex; flex-direction: column; gap: 8px; }
 .sub-row {
-  display: grid; grid-template-columns: auto 1fr 64px auto; gap: 8px; align-items: center;
-  background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px;
+  display: flex; flex-direction: column; gap: 6px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
 }
-.sub-row input[type=checkbox] { width: 18px; height: 18px; accent-color: var(--green); cursor: pointer; }
-.sub-row .sub-title { background: transparent; border: none; color: var(--text); font-size: 14px; padding: 4px 6px; font-family: inherit; }
+.sub-line1 { display: flex; align-items: center; gap: 8px; }
+.sub-line2 { display: flex; align-items: center; gap: 16px; padding-left: 26px; flex-wrap: wrap; }
+.sub-row input[type=checkbox] { width: 18px; height: 18px; accent-color: var(--green); cursor: pointer; flex-shrink: 0; }
+.sub-row .sub-title { flex: 1; min-width: 0; background: transparent; border: none; color: var(--text); font-size: 14px; padding: 4px 6px; font-family: inherit; }
 .sub-row .sub-title:focus { outline: none; }
-.sub-row .sub-weight {
+.sub-field { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.sub-field.overdue { color: #ff8077; font-weight: 600; }
+.sub-row .sub-due, .sub-row .sub-weight {
   background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
-  color: var(--text); font-size: 13px; padding: 5px 6px; text-align: center; font-family: inherit;
+  color: var(--text); font-size: 13px; padding: 5px 6px; font-family: inherit;
 }
-.sub-row .sub-del { font-size: 14px; }
+.sub-row .sub-weight { width: 56px; text-align: center; }
+.sub-row .sub-del { font-size: 14px; margin-left: auto; }
 .sub-row .sub-del:hover { color: var(--red); }
 
 /* ---------- Archivos adjuntos ---------- */
