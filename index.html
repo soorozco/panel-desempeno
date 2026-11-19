@@ -19,6 +19,7 @@
       <button class="tab active" data-view="dashboard">Resumen</button>
       <button class="tab" data-view="workers">Trabajadores</button>
       <button class="tab" data-view="activities">Actividades</button>
+      <button class="tab" data-view="oficios">Oficios</button>
     </nav>
     <div class="topbar-actions">
       <span id="userEmail" class="user-pill hidden"></span>
@@ -90,6 +91,35 @@
         <input type="search" id="filterSearch" placeholder="Buscar actividad u objetivo…" />
       </div>
       <div id="activitiesList" class="task-list"></div>
+    </section>
+
+    <!-- ============ OFICIOS ============ -->
+    <section id="view-oficios" class="view hidden">
+      <div class="view-head">
+        <h2>Seguimiento de oficios</h2>
+        <div class="head-actions">
+          <button id="btnImportOficios" class="btn" title="Cargar o actualizar oficios desde un archivo CSV">⬆ Importar CSV</button>
+          <button id="btnAddOficio" class="btn primary">+ Nuevo oficio</button>
+          <input type="file" id="fileOficios" accept=".csv,text/csv" hidden />
+        </div>
+      </div>
+      <div id="oficiosNotice" class="notice hidden"></div>
+      <div class="stats-grid" id="oficiosStats"></div>
+      <div class="filters">
+        <select id="ofiFilterStatus">
+          <option value="">Todos los estatus</option>
+          <option value="abiertos">Abiertos (sin acuse)</option>
+          <option value="atencion">Requieren atención</option>
+          <option value="en_firma">En firma</option>
+          <option value="firmado">Firmado</option>
+          <option value="enviado">Enviado</option>
+          <option value="acuse">Acuse</option>
+          <option value="cancelado">Cancelado</option>
+        </select>
+        <select id="ofiFilterWorker"><option value="">Todos los responsables</option></select>
+        <input type="search" id="ofiFilterSearch" placeholder="Buscar número, concepto o destinatario…" />
+      </div>
+      <div id="oficiosList"></div>
     </section>
 
   </main>

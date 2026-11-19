@@ -7,6 +7,7 @@ App web para dar seguimiento a las actividades, objetivos, progreso y pendientes
 - **Resumen**: tablero general con cumplimiento global, actividades en progreso, atrasadas y lista de pendientes.
 - **Trabajadores**: tarjetas con el desempeño de cada persona. Clic en una tarjeta para ver su detalle y asignarle actividades.
 - **Actividades**: todas las tareas con su objetivo, prioridad, estado, fecha límite y % de progreso. Con filtros y búsqueda.
+- **Oficios**: seguimiento de oficios por estatus (En firma → Firmado → Enviado → Acuse, o Cancelado), con responsable, notas y aviso de los que llevan más de 15 días sin acuse. Se cargan o actualizan con **Importar CSV** (columnas `Oficio`, `Fecha`, `Estatus`; opcionales `Concepto`, `Destinatario`). En modo nube requiere correr `migracion-oficios.sql` una vez.
 - Detecta automáticamente las actividades **atrasadas** (fecha límite vencida y no cumplidas).
 - **Respaldo / Importar**: descarga un archivo `.json` con todos los datos y vuelve a cargarlo cuando quieras (o en otra computadora).
 

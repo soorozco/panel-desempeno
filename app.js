@@ -42,12 +42,13 @@ function fileToDataUrl(file) {
 }
 
 /* ---------- Estado ---------- */
-let state = { workers: [], activities: [] };
+let state = { workers: [], activities: [], oficios: [] };
+let oficiosUnavailable = false; // modo nube: la tabla 'oficios' aún no existe
 
 function loadLocal() {
   try {
     const raw = localStorage.getItem(STORE_KEY);
-    if (raw) return JSON.parse(raw);
+    if (raw) { const d = JSON.parse(raw); if (!Array.isArray(d.oficios)) d.oficios = []; return d; }
   } catch (e) { console.error('Error al leer datos', e); }
   return seed();
 }
@@ -65,6 +66,13 @@ const aFromDb = r => ({ id: r.id, workerId: r.worker_id, title: r.title, objecti
   priority: r.priority, status: r.status, progress: r.progress, due: r.due || '', createdAt: r.created_at || '',
   subtasks: Array.isArray(r.subtasks) ? r.subtasks : [], attachments: Array.isArray(r.attachments) ? r.attachments : [] });
 
+const oToDb = o => ({ id: o.id, numero: o.numero, fecha: o.fecha || null, estatus: o.estatus,
+  asunto: o.asunto || '', destinatario: o.destinatario || '', worker_id: o.workerId || null,
+  notas: o.notas || '', updated_at: o.updatedAt || null });
+const oFromDb = r => ({ id: r.id, numero: r.numero, fecha: r.fecha || '', estatus: r.estatus,
+  asunto: r.asunto || '', destinatario: r.destinatario || '', workerId: r.worker_id || '',
+  notas: r.notas || '', updatedAt: r.updated_at || '' });
+
 /* ---------- Adaptador de datos: nube o local según configuración ---------- */
 const DB = {
   async load() {
@@ -75,7 +83,23 @@ const DB = {
     ]);
     if (w.error) throw w.error;
     if (a.error) throw a.error;
-    return { workers: w.data.map(wFromDb), activities: a.data.map(aFromDb) };
+    // Oficios: si la tabla aún no existe (falta correr la migración), la app sigue funcionando.
+    const o = await SUPA.from('oficios').select('*');
+    oficiosUnavailable = !!o.error;
+    if (o.error) console.warn('Tabla oficios no disponible:', o.error.message);
+    return { workers: w.data.map(wFromDb), activities: a.data.map(aFromDb),
+      oficios: o.error ? [] : o.data.map(oFromDb) };
+  },
+  async saveOficios(list) {
+    if (!CLOUD) return saveLocal();
+    if (!list.length) return;
+    const { error } = await SUPA.from('oficios').upsert(list.map(oToDb));
+    if (error) throw error;
+  },
+  async deleteOficio(id) {
+    if (!CLOUD) return saveLocal();
+    const { error } = await SUPA.from('oficios').delete().eq('id', id);
+    if (error) throw error;
   },
   async saveWorker(w) {
     if (!CLOUD) return saveLocal();
@@ -128,8 +152,16 @@ const DB = {
     return data.signedUrl;
   },
   async replaceAll(data) {
+    // Un respaldo antiguo (sin oficios) no borra los oficios actuales.
+    const replaceOficios = Array.isArray(data.oficios);
+    if (!replaceOficios) data.oficios = state.oficios || [];
     if (!CLOUD) { state = data; saveLocal(); return; }
-    let r = await SUPA.from('activities').delete().neq('id', '');
+    let r;
+    if (replaceOficios && !oficiosUnavailable) {
+      r = await SUPA.from('oficios').delete().neq('id', '');
+      if (r.error) throw r.error;
+    }
+    r = await SUPA.from('activities').delete().neq('id', '');
     if (r.error) throw r.error;
     r = await SUPA.from('workers').delete().neq('id', '');
     if (r.error) throw r.error;
@@ -139,6 +171,10 @@ const DB = {
     }
     if (data.activities.length) {
       r = await SUPA.from('activities').upsert(data.activities.map(aToDb));
+      if (r.error) throw r.error;
+    }
+    if (replaceOficios && !oficiosUnavailable && data.oficios.length) {
+      r = await SUPA.from('oficios').upsert(data.oficios.map(oToDb));
       if (r.error) throw r.error;
     }
     state = data;
@@ -163,6 +199,7 @@ function seed() {
       { id: uid(), workerId: w2, title: 'Control de calidad concreto', objective: 'Tomar muestras y registrar', priority: 'media', status: 'en_progreso', progress: 40, due: d(5), createdAt: d(-2) },
       { id: uid(), workerId: w3, title: 'Limpieza de área', objective: 'Despejar zona de trabajo', priority: 'baja', status: 'pendiente', progress: 0, due: d(2), createdAt: d(-1) },
     ],
+    oficios: [],
   };
 }
 
@@ -459,6 +496,7 @@ function workerForm(worker) {
       if (!confirm(`¿Eliminar a ${worker.name} y todas sus actividades?`)) return;
       state.workers = state.workers.filter(x => x.id !== worker.id);
       state.activities = state.activities.filter(a => a.workerId !== worker.id);
+      (state.oficios || []).forEach(o => { if (o.workerId === worker.id) o.workerId = ''; });
       try {
         await DB.deleteWorker(worker.id);
         closeModal(); renderAll(); toast('Trabajador eliminado');
@@ -748,6 +786,299 @@ function workerDetail(id) {
 }
 
 /* =========================================================
+   Oficios — seguimiento
+   ---------------------------------------------------------
+   Cada oficio: { id, numero, fecha, estatus, asunto, destinatario,
+                  workerId (responsable), notas, updatedAt }
+   Flujo: En firma → Firmado → Enviado → Acuse   (o Cancelado)
+   "Abierto" = todavía sin acuse y no cancelado.
+   ========================================================= */
+const OFI_STATUS = ['en_firma', 'firmado', 'enviado', 'acuse', 'cancelado'];
+const OFI_LABEL = { en_firma: 'En firma', firmado: 'Firmado', enviado: 'Enviado', acuse: 'Acuse', cancelado: 'Cancelado' };
+const OFI_ALERT_DAYS = 15; // días sin acuse a partir de los cuales se marca "requiere atención"
+
+function ofiOpen(o) { return o.estatus !== 'acuse' && o.estatus !== 'cancelado'; }
+function ofiDays(o) {
+  if (!o.fecha) return null;
+  const [y, m, d] = o.fecha.split('-').map(Number);
+  return Math.floor((today0() - new Date(y, m - 1, d)) / 86400000);
+}
+function ofiAlert(o) { const d = ofiDays(o); return ofiOpen(o) && d !== null && d >= OFI_ALERT_DAYS; }
+function ofiKey(numero) { return (numero || '').trim().toUpperCase().replace(/\s+/g, ''); }
+// Orden: más reciente primero; a igual fecha, número consecutivo mayor primero.
+function ofiSeq(o) { const m = (o.numero || '').match(/(\d+)\s*\/\s*\d{4}\s*$/) || (o.numero || '').match(/(\d+)/); return m ? +m[1] : 0; }
+function ofiSort(a, b) { return (b.fecha || '').localeCompare(a.fecha || '') || ofiSeq(b) - ofiSeq(a); }
+
+function renderOficios() {
+  const all = state.oficios || [];
+  const notice = document.getElementById('oficiosNotice');
+  notice.classList.toggle('hidden', !oficiosUnavailable);
+  if (oficiosUnavailable) {
+    notice.innerHTML = '⚠ Falta crear la tabla de oficios en Supabase. Corre <b>migracion-oficios.sql</b> en Supabase → SQL Editor y recarga la página.';
+  }
+
+  const count = s => all.filter(o => o.estatus === s).length;
+  const atencion = all.filter(ofiAlert).length;
+  document.getElementById('oficiosStats').innerHTML = `
+    ${statCard('En firma', count('en_firma') + count('firmado'), 'var(--amber)', count('firmado') ? count('firmado') + ' ya firmados, por enviar' : 'Pendientes de firma')}
+    ${statCard('Enviados sin acuse', count('enviado'), 'var(--primary)', 'Esperando acuse')}
+    ${statCard('Con acuse', count('acuse'), 'var(--green)', 'de ' + all.length + ' oficios')}
+    ${statCard('Requieren atención', atencion, 'var(--red)', atencion ? 'Más de ' + OFI_ALERT_DAYS + ' días sin acuse' : 'Nada rezagado 🎉')}
+  `;
+
+  const fw = document.getElementById('ofiFilterWorker');
+  const cur = fw.value;
+  fw.innerHTML = '<option value="">Todos los responsables</option><option value="_none">Sin responsable</option>' +
+    state.workers.map(w => `<option value="${w.id}">${escapeHtml(w.name)}</option>`).join('');
+  fw.value = cur;
+
+  const sFilter = document.getElementById('ofiFilterStatus').value;
+  const wFilter = fw.value;
+  const q = document.getElementById('ofiFilterSearch').value.toLowerCase().trim();
+  let list = all.slice();
+  if (sFilter === 'abiertos') list = list.filter(ofiOpen);
+  else if (sFilter === 'atencion') list = list.filter(ofiAlert);
+  else if (sFilter) list = list.filter(o => o.estatus === sFilter);
+  if (wFilter === '_none') list = list.filter(o => !workerById(o.workerId));
+  else if (wFilter) list = list.filter(o => o.workerId === wFilter);
+  if (q) list = list.filter(o => [o.numero, o.asunto, o.destinatario, o.notas].join(' ').toLowerCase().includes(q));
+  list.sort(ofiSort);
+
+  const el = document.getElementById('oficiosList');
+  if (!list.length) {
+    el.innerHTML = emptyBox(all.length ? 'Ningún oficio coincide con el filtro.' : 'Aún no hay oficios. Usa “Importar CSV” para cargar tu tabla o agrega uno nuevo.');
+    return;
+  }
+  el.innerHTML = `<div class="ofi-wrap"><table class="ofi-table">
+    <thead><tr><th>Oficio</th><th>Fecha</th><th>Concepto / destinatario</th><th>Responsable</th><th>Estatus</th><th>Sin acuse</th></tr></thead>
+    <tbody>${list.map(ofiRow).join('')}</tbody>
+  </table></div>
+  <div class="muted" style="margin-top:10px">${list.length} de ${all.length} oficio(s)</div>`;
+}
+
+function ofiRow(o) {
+  const w = workerById(o.workerId);
+  const d = ofiDays(o);
+  const late = ofiAlert(o);
+  let days = '—';
+  if (o.estatus === 'acuse') days = '✓';
+  else if (ofiOpen(o) && d !== null) days = d <= 0 ? 'hoy' : d + (d === 1 ? ' día' : ' días');
+  return `<tr data-ofi="${o.id}" class="${late ? 'alert' : ''}">
+    <td class="ofi-num">${escapeHtml(o.numero)}</td>
+    <td class="ofi-date">${fmtDate(o.fecha)}</td>
+    <td class="ofi-concept">${o.asunto ? `<div class="ofi-clamp" title="Clic para ver el concepto completo">${escapeHtml(o.asunto)}</div>` : '<span class="ofi-sub">Sin concepto</span>'}${o.destinatario ? `<div class="ofi-sub">→ ${escapeHtml(o.destinatario)}</div>` : ''}</td>
+    <td>${w ? escapeHtml(w.name) : '<span class="ofi-sub">—</span>'}</td>
+    <td><select class="ofi-status ${o.estatus}" title="Cambiar estatus">
+      ${OFI_STATUS.map(s => `<option value="${s}" ${s === o.estatus ? 'selected' : ''}>${OFI_LABEL[s]}</option>`).join('')}
+    </select></td>
+    <td class="ofi-days ${late ? 'late' : ''}">${days}</td>
+  </tr>`;
+}
+
+function oficioForm(oficio) {
+  const today = new Date(); const pad = n => String(n).padStart(2, '0');
+  const todayIso = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
+  const o = oficio || { numero: '', fecha: todayIso, estatus: 'en_firma', asunto: '', destinatario: '', workerId: '', notas: '' };
+  openModal(oficio ? 'Editar oficio' : 'Nuevo oficio', `
+    <div class="field-row">
+      <div class="field">
+        <label>Número de oficio *</label>
+        <input id="o-numero" value="${escapeHtml(o.numero)}" placeholder="Ej. CGC/550/2026" />
+      </div>
+      <div class="field">
+        <label>Fecha</label>
+        <input type="date" id="o-fecha" value="${o.fecha || ''}" />
+      </div>
+    </div>
+    <div class="field">
+      <label>Concepto</label>
+      <textarea id="o-asunto" class="ofi-concept-input" placeholder="¿De qué trata el oficio?">${escapeHtml(o.asunto || '')}</textarea>
+    </div>
+    <div class="field">
+      <label>Destinatario / dependencia</label>
+      <input id="o-dest" value="${escapeHtml(o.destinatario || '')}" placeholder="¿A quién va dirigido?" />
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label>Estatus</label>
+        <select id="o-estatus">${OFI_STATUS.map(s => `<option value="${s}" ${s === o.estatus ? 'selected' : ''}>${OFI_LABEL[s]}</option>`).join('')}</select>
+      </div>
+      <div class="field">
+        <label>Responsable del seguimiento</label>
+        <select id="o-worker"><option value="">Sin asignar</option>${state.workers.map(w => `<option value="${w.id}" ${w.id === o.workerId ? 'selected' : ''}>${escapeHtml(w.name)}</option>`).join('')}</select>
+      </div>
+    </div>
+    <div class="field">
+      <label>Notas de seguimiento</label>
+      <textarea id="o-notas" placeholder="Ej. Se llamó el 12/11, prometen acuse esta semana.">${escapeHtml(o.notas || '')}</textarea>
+    </div>
+    <div class="modal-actions">
+      ${oficio ? `<button class="btn danger" id="o-del">Eliminar</button>` : '<span></span>'}
+      <div class="right">
+        <button class="btn" id="o-cancel">Cancelar</button>
+        <button class="btn primary" id="o-save">Guardar</button>
+      </div>
+    </div>
+  `);
+  document.getElementById('o-cancel').onclick = closeModal;
+  document.getElementById('o-save').onclick = async () => {
+    const numero = document.getElementById('o-numero').value.trim();
+    if (!numero) return toast('El número de oficio es obligatorio', true);
+    const dup = state.oficios.find(x => ofiKey(x.numero) === ofiKey(numero) && x !== oficio);
+    if (dup) return toast('Ya existe un oficio con ese número', true);
+    const data = {
+      numero,
+      fecha: document.getElementById('o-fecha').value,
+      asunto: document.getElementById('o-asunto').value.trim(),
+      destinatario: document.getElementById('o-dest').value.trim(),
+      estatus: document.getElementById('o-estatus').value,
+      workerId: document.getElementById('o-worker').value,
+      notas: document.getElementById('o-notas').value.trim(),
+      updatedAt: new Date().toISOString(),
+    };
+    const before = oficio ? { ...oficio } : null;
+    let target;
+    if (oficio) { Object.assign(oficio, data); target = oficio; }
+    else { target = { id: uid(), ...data }; state.oficios.push(target); }
+    try {
+      await DB.saveOficios([target]);
+      closeModal(); renderAll(); toast('Oficio guardado');
+    } catch (e) {
+      if (before) Object.assign(oficio, before); else state.oficios = state.oficios.filter(x => x !== target);
+      toast('Error al guardar: ' + (e.message || e), true);
+    }
+  };
+  if (oficio) {
+    document.getElementById('o-del').onclick = async () => {
+      if (!confirm(`¿Eliminar el oficio ${oficio.numero}?`)) return;
+      try {
+        state.oficios = state.oficios.filter(x => x.id !== oficio.id);
+        await DB.deleteOficio(oficio.id);
+        closeModal(); renderAll(); toast('Oficio eliminado');
+      } catch (e) { state.oficios.push(oficio); renderAll(); toast('Error al eliminar: ' + (e.message || e), true); }
+    };
+  }
+}
+
+/* ----- Importar oficios desde CSV -----
+   Columnas reconocidas (por nombre de encabezado): Oficio, Fecha, Estatus,
+   y opcionalmente Concepto (o Asunto) y Destinatario. Si el número ya existe se actualiza
+   (no se duplica), así puedes volver a importar la tabla cuando cambie. */
+function parseCsv(text) {
+  text = text.replace(/^﻿/, '');
+  const firstLine = text.split(/\r?\n/)[0] || '';
+  const sep = (firstLine.split(';').length > firstLine.split(',').length) ? ';' : ',';
+  const rows = []; let row = [], cell = '', inQ = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQ) {
+      if (c === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else inQ = false; }
+      else cell += c;
+    } else if (c === '"') inQ = true;
+    else if (c === sep) { row.push(cell); cell = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(cell); cell = ''; rows.push(row); row = [];
+    } else cell += c;
+  }
+  if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
+  return rows.filter(r => r.some(x => x.trim() !== ''));
+}
+function normTxt(s) { return (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').trim().toLowerCase(); }
+function parseOfiDate(s) {
+  s = (s || '').trim();
+  let m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/);
+  if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+  m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+  return '';
+}
+function parseOfiStatus(s) {
+  const k = normTxt(s).replace(/[\s_-]+/g, '_');
+  if (OFI_STATUS.includes(k)) return k;
+  if (k.startsWith('acus')) return 'acuse';
+  if (k.startsWith('cancel')) return 'cancelado';
+  if (k.startsWith('envia')) return 'enviado';
+  if (k.startsWith('firmad')) return 'firmado';
+  if (k.includes('firma')) return 'en_firma';
+  return null;
+}
+
+async function importOficiosCsv(file) {
+  let rows;
+  try { rows = parseCsv(await file.text()); } catch (e) { return toast('No se pudo leer el archivo', true); }
+  if (rows.length < 2) return toast('El archivo no tiene oficios', true);
+  const head = rows[0].map(normTxt);
+  const col = (...names) => head.findIndex(h => names.some(n => h === n || h.startsWith(n)));
+  const cNum = col('oficio', 'numero', 'no. oficio', 'folio');
+  const cFecha = col('fecha'), cEst = col('estatus', 'estado', 'status');
+  const cAsunto = col('concepto', 'asunto', 'descripcion'), cDest = col('destinatario', 'dirigido', 'dependencia');
+  if (cNum < 0 || cEst < 0) return toast('El CSV necesita las columnas "Oficio" y "Estatus"', true);
+
+  const byKey = new Map(state.oficios.map(o => [ofiKey(o.numero), o]));
+  const changed = []; const backups = new Map(); const added = [];
+  let nuevos = 0, actualizados = 0, iguales = 0, invalidos = 0;
+  for (const r of rows.slice(1)) {
+    const numero = (r[cNum] || '').trim();
+    const estatus = parseOfiStatus(r[cEst]);
+    if (!numero || !estatus) { invalidos++; continue; }
+    const fecha = cFecha >= 0 ? parseOfiDate(r[cFecha]) : '';
+    // El concepto puede traer saltos de línea escritos como "\n": se convierten en saltos reales.
+    const asunto = cAsunto >= 0 ? (r[cAsunto] || '').replace(/\\r\\n|\\n/g, '\n').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim() : '';
+    const destinatario = cDest >= 0 ? (r[cDest] || '').trim() : '';
+    const ex = byKey.get(ofiKey(numero));
+    if (ex) {
+      const next = { estatus, fecha: fecha || ex.fecha, asunto: asunto || ex.asunto, destinatario: destinatario || ex.destinatario };
+      if (Object.keys(next).every(k => (ex[k] || '') === (next[k] || ''))) { iguales++; continue; }
+      backups.set(ex, { ...ex });
+      Object.assign(ex, next, { updatedAt: new Date().toISOString() });
+      changed.push(ex); actualizados++;
+    } else {
+      const o = { id: uid(), numero, fecha, estatus, asunto, destinatario, workerId: '', notas: '', updatedAt: new Date().toISOString() };
+      byKey.set(ofiKey(numero), o); added.push(o); changed.push(o); nuevos++;
+    }
+  }
+  if (!changed.length) return toast(invalidos ? `Sin cambios (${invalidos} fila(s) no válidas)` : 'Sin cambios: todo ya estaba al día');
+  state.oficios.push(...added);
+  try {
+    await DB.saveOficios(changed);
+    renderAll();
+    toast(`${nuevos} nuevo(s), ${actualizados} actualizado(s)` + (iguales ? `, ${iguales} sin cambios` : '') + (invalidos ? `, ${invalidos} fila(s) omitidas` : ''));
+  } catch (e) {
+    state.oficios = state.oficios.filter(o => !added.includes(o));
+    backups.forEach((old, o) => Object.assign(o, old));
+    renderAll();
+    toast('Error al importar: ' + (e.message || e), true);
+  }
+}
+
+document.getElementById('btnAddOficio').onclick = () => oficioForm(null);
+document.getElementById('btnImportOficios').onclick = () => document.getElementById('fileOficios').click();
+document.getElementById('fileOficios').onchange = e => { if (e.target.files[0]) importOficiosCsv(e.target.files[0]); e.target.value = ''; };
+['ofiFilterStatus', 'ofiFilterWorker', 'ofiFilterSearch'].forEach(id =>
+  document.getElementById(id).addEventListener('input', renderOficios));
+document.getElementById('oficiosList').addEventListener('click', e => {
+  if (e.target.closest('select')) return; // el selector de estatus no abre el detalle
+  const t = e.target.closest('[data-ofi]');
+  if (t) { const o = state.oficios.find(x => x.id === t.dataset.ofi); if (o) oficioForm(o); }
+});
+// Cambio rápido de estatus desde la tabla
+document.getElementById('oficiosList').addEventListener('change', async e => {
+  if (!e.target.classList.contains('ofi-status')) return;
+  const o = state.oficios.find(x => x.id === e.target.closest('[data-ofi]').dataset.ofi);
+  if (!o) return;
+  const prev = o.estatus, prevAt = o.updatedAt;
+  o.estatus = e.target.value; o.updatedAt = new Date().toISOString();
+  try {
+    await DB.saveOficios([o]);
+    renderOficios(); toast(`${o.numero}: ${OFI_LABEL[o.estatus]}`);
+  } catch (err) {
+    o.estatus = prev; o.updatedAt = prevAt; renderOficios();
+    toast('Error al guardar: ' + (err.message || err), true);
+  }
+});
+
+/* =========================================================
    Respaldo (export / import)
    ========================================================= */
 function exportData() {
@@ -804,6 +1135,7 @@ function renderAll() {
   renderDashboard();
   renderWorkers();
   renderActivities();
+  renderOficios();
 }
 
 document.querySelectorAll('.tab').forEach(t => t.onclick = () => switchView(t.dataset.view));
