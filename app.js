@@ -42,13 +42,14 @@ function fileToDataUrl(file) {
 }
 
 /* ---------- Estado ---------- */
-let state = { workers: [], activities: [], oficios: [] };
+let state = { workers: [], activities: [], oficios: [], recibidos: [] };
+let recibidosUnavailable = false; // modo nube: la tabla 'oficios_recibidos' aún no existe
 let oficiosUnavailable = false; // modo nube: la tabla 'oficios' aún no existe
 
 function loadLocal() {
   try {
     const raw = localStorage.getItem(STORE_KEY);
-    if (raw) { const d = JSON.parse(raw); if (!Array.isArray(d.oficios)) d.oficios = []; return d; }
+    if (raw) { const d = JSON.parse(raw); if (!Array.isArray(d.oficios)) d.oficios = []; if (!Array.isArray(d.recibidos)) d.recibidos = []; return d; }
   } catch (e) { console.error('Error al leer datos', e); }
   return seed();
 }
@@ -73,6 +74,33 @@ const oFromDb = r => ({ id: r.id, numero: r.numero, fecha: r.fecha || '', estatu
   asunto: r.asunto || '', destinatario: r.destinatario || '', workerId: r.worker_id || '',
   notas: r.notas || '', updatedAt: r.updated_at || '' });
 
+const rToDb = r => ({ id: r.id, control: r.control || '', numero: r.numero, fecha: r.fecha || null,
+  servicio: r.servicio || '', remitente: r.remitente || '', dirigido: r.dirigido || '', tipo: r.tipo || 'original',
+  asunto: r.asunto || '', estatus: r.estatus, respuesta: r.respuesta || '', worker_id: r.workerId || null,
+  notas: r.notas || '', updated_at: r.updatedAt || null });
+const rFromDb = r => ({ id: r.id, control: r.control || '', numero: r.numero, fecha: r.fecha || '',
+  servicio: r.servicio || '', remitente: r.remitente || '', dirigido: r.dirigido || '', tipo: r.tipo || 'original',
+  asunto: r.asunto || '', estatus: r.estatus, respuesta: r.respuesta || '', workerId: r.worker_id || '',
+  notas: r.notas || '', updatedAt: r.updated_at || '' });
+
+// Supabase devuelve máximo 1000 filas por consulta: se leen por páginas.
+async function fetchAll(table) {
+  const out = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await SUPA.from(table).select('*').order('id').range(from, from + 999);
+    if (error) return { error };
+    out.push(...data);
+    if (data.length < 1000) return { data: out };
+  }
+}
+// Guarda muchas filas en bloques para no mandar peticiones enormes.
+async function upsertChunks(table, rows, size = 200) {
+  for (let i = 0; i < rows.length; i += size) {
+    const { error } = await SUPA.from(table).upsert(rows.slice(i, i + size));
+    if (error) throw error;
+  }
+}
+
 /* ---------- Adaptador de datos: nube o local según configuración ---------- */
 const DB = {
   async load() {
@@ -84,16 +112,28 @@ const DB = {
     if (w.error) throw w.error;
     if (a.error) throw a.error;
     // Oficios: si la tabla aún no existe (falta correr la migración), la app sigue funcionando.
-    const o = await SUPA.from('oficios').select('*');
+    const [o, rc] = await Promise.all([fetchAll('oficios'), fetchAll('oficios_recibidos')]);
     oficiosUnavailable = !!o.error;
+    recibidosUnavailable = !!rc.error;
     if (o.error) console.warn('Tabla oficios no disponible:', o.error.message);
+    if (rc.error) console.warn('Tabla oficios_recibidos no disponible:', rc.error.message);
     return { workers: w.data.map(wFromDb), activities: a.data.map(aFromDb),
-      oficios: o.error ? [] : o.data.map(oFromDb) };
+      oficios: o.error ? [] : o.data.map(oFromDb),
+      recibidos: rc.error ? [] : rc.data.map(rFromDb) };
   },
   async saveOficios(list) {
     if (!CLOUD) return saveLocal();
     if (!list.length) return;
-    const { error } = await SUPA.from('oficios').upsert(list.map(oToDb));
+    await upsertChunks('oficios', list.map(oToDb));
+  },
+  async saveRecibidos(list) {
+    if (!CLOUD) return saveLocal();
+    if (!list.length) return;
+    await upsertChunks('oficios_recibidos', list.map(rToDb));
+  },
+  async deleteRecibido(id) {
+    if (!CLOUD) return saveLocal();
+    const { error } = await SUPA.from('oficios_recibidos').delete().eq('id', id);
     if (error) throw error;
   },
   async deleteOficio(id) {
@@ -155,8 +195,14 @@ const DB = {
     // Un respaldo antiguo (sin oficios) no borra los oficios actuales.
     const replaceOficios = Array.isArray(data.oficios);
     if (!replaceOficios) data.oficios = state.oficios || [];
+    const replaceRecibidos = Array.isArray(data.recibidos);
+    if (!replaceRecibidos) data.recibidos = state.recibidos || [];
     if (!CLOUD) { state = data; saveLocal(); return; }
     let r;
+    if (replaceRecibidos && !recibidosUnavailable) {
+      r = await SUPA.from('oficios_recibidos').delete().neq('id', '');
+      if (r.error) throw r.error;
+    }
     if (replaceOficios && !oficiosUnavailable) {
       r = await SUPA.from('oficios').delete().neq('id', '');
       if (r.error) throw r.error;
@@ -174,8 +220,10 @@ const DB = {
       if (r.error) throw r.error;
     }
     if (replaceOficios && !oficiosUnavailable && data.oficios.length) {
-      r = await SUPA.from('oficios').upsert(data.oficios.map(oToDb));
-      if (r.error) throw r.error;
+      await upsertChunks('oficios', data.oficios.map(oToDb));
+    }
+    if (replaceRecibidos && !recibidosUnavailable && data.recibidos.length) {
+      await upsertChunks('oficios_recibidos', data.recibidos.map(rToDb));
     }
     state = data;
   },
@@ -200,6 +248,7 @@ function seed() {
       { id: uid(), workerId: w3, title: 'Limpieza de área', objective: 'Despejar zona de trabajo', priority: 'baja', status: 'pendiente', progress: 0, due: d(2), createdAt: d(-1) },
     ],
     oficios: [],
+    recibidos: [],
   };
 }
 
@@ -497,6 +546,7 @@ function workerForm(worker) {
       state.workers = state.workers.filter(x => x.id !== worker.id);
       state.activities = state.activities.filter(a => a.workerId !== worker.id);
       (state.oficios || []).forEach(o => { if (o.workerId === worker.id) o.workerId = ''; });
+      (state.recibidos || []).forEach(o => { if (o.workerId === worker.id) o.workerId = ''; });
       try {
         await DB.deleteWorker(worker.id);
         closeModal(); renderAll(); toast('Trabajador eliminado');
@@ -811,6 +861,7 @@ function ofiSort(a, b) { return (b.fecha || '').localeCompare(a.fecha || '') || 
 
 function renderOficios() {
   const all = state.oficios || [];
+  document.getElementById('ofiCountEnv').textContent = all.length ? '(' + all.length + ')' : '';
   const notice = document.getElementById('oficiosNotice');
   notice.classList.toggle('hidden', !oficiosUnavailable);
   if (oficiosUnavailable) {
@@ -991,6 +1042,11 @@ function parseOfiDate(s) {
   if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
   m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
   if (m) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+  // Fecha de Excel guardada como número de serie (días desde 1900).
+  if (/^\d{4,6}(\.\d+)?$/.test(s)) {
+    const dt = new Date(Date.UTC(1899, 11, 30) + Math.floor(parseFloat(s)) * 86400000);
+    return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
+  }
   return '';
 }
 function parseOfiStatus(s) {
@@ -1006,14 +1062,14 @@ function parseOfiStatus(s) {
 
 async function importOficiosCsv(file) {
   let rows;
-  try { rows = parseCsv(await file.text()); } catch (e) { return toast('No se pudo leer el archivo', true); }
+  try { rows = await readTableFile(file); } catch (e) { return toast('No se pudo leer el archivo: ' + (e.message || e), true); }
   if (rows.length < 2) return toast('El archivo no tiene oficios', true);
-  const head = rows[0].map(normTxt);
-  const col = (...names) => head.findIndex(h => names.some(n => h === n || h.startsWith(n)));
+  const col = colFinder(rows[0]);
+  if (col('remitente') >= 0 && col('estatus', 'estado', 'status') < 0) return toast('Este archivo parece de oficios RECIBIDOS: impórtalo en la pestaña Recibidos', true);
   const cNum = col('oficio', 'numero', 'no. oficio', 'folio');
   const cFecha = col('fecha'), cEst = col('estatus', 'estado', 'status');
   const cAsunto = col('concepto', 'asunto', 'descripcion'), cDest = col('destinatario', 'dirigido', 'dependencia');
-  if (cNum < 0 || cEst < 0) return toast('El CSV necesita las columnas "Oficio" y "Estatus"', true);
+  if (cNum < 0 || cEst < 0) return toast('El archivo necesita las columnas "Oficio" y "Estatus"', true);
 
   const byKey = new Map(state.oficios.map(o => [ofiKey(o.numero), o]));
   const changed = []; const backups = new Map(); const added = [];
@@ -1024,7 +1080,7 @@ async function importOficiosCsv(file) {
     if (!numero || !estatus) { invalidos++; continue; }
     const fecha = cFecha >= 0 ? parseOfiDate(r[cFecha]) : '';
     // El concepto puede traer saltos de línea escritos como "\n": se convierten en saltos reales.
-    const asunto = cAsunto >= 0 ? (r[cAsunto] || '').replace(/\\r\\n|\\n/g, '\n').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim() : '';
+    const asunto = cAsunto >= 0 ? cleanText(r[cAsunto]) : '';
     const destinatario = cDest >= 0 ? (r[cDest] || '').trim() : '';
     const ex = byKey.get(ofiKey(numero));
     if (ex) {
@@ -1042,6 +1098,8 @@ async function importOficiosCsv(file) {
   state.oficios.push(...added);
   try {
     await DB.saveOficios(changed);
+    // Con enviados nuevos puede haber recibidos que ya quedaron contestados.
+    try { const linked = autoLinkRecibidos(state.recibidos); if (linked.length) await DB.saveRecibidos(linked); } catch (_) {}
     renderAll();
     toast(`${nuevos} nuevo(s), ${actualizados} actualizado(s)` + (iguales ? `, ${iguales} sin cambios` : '') + (invalidos ? `, ${invalidos} fila(s) omitidas` : ''));
   } catch (e) {
@@ -1074,6 +1132,404 @@ document.getElementById('oficiosList').addEventListener('change', async e => {
     renderOficios(); toast(`${o.numero}: ${OFI_LABEL[o.estatus]}`);
   } catch (err) {
     o.estatus = prev; o.updatedAt = prevAt; renderOficios();
+    toast('Error al guardar: ' + (err.message || err), true);
+  }
+});
+
+/* ----- Lectura de archivos: CSV o Excel (.xlsx) -----
+   Devuelve una lista de filas (cada fila = lista de textos).
+   El .xlsx se lee aquí mismo, sin librerías: es un ZIP con XML dentro. */
+async function readTableFile(file) {
+  const rows = /\.xlsx$/i.test(file.name) ? await readXlsx(await file.arrayBuffer()) : parseCsv(await file.text());
+  return rows.filter(r => r.some(x => (x || '').trim() !== ''));
+}
+async function readXlsx(buf) {
+  const dv = new DataView(buf), u8 = new Uint8Array(buf), td = new TextDecoder();
+  let e = buf.byteLength - 22;
+  while (e >= 0 && dv.getUint32(e, true) !== 0x06054b50) e--;
+  if (e < 0) throw new Error('no es un Excel .xlsx válido');
+  const total = dv.getUint16(e + 10, true);
+  let p = dv.getUint32(e + 16, true);
+  const files = {};
+  for (let i = 0; i < total; i++) {
+    const nlen = dv.getUint16(p + 28, true), xlen = dv.getUint16(p + 30, true), clen = dv.getUint16(p + 32, true);
+    files[td.decode(u8.subarray(p + 46, p + 46 + nlen))] =
+      { method: dv.getUint16(p + 10, true), csize: dv.getUint32(p + 20, true), off: dv.getUint32(p + 42, true) };
+    p += 46 + nlen + xlen + clen;
+  }
+  const read = async name => {
+    const f = files[name]; if (!f) return null;
+    const start = f.off + 30 + dv.getUint16(f.off + 26, true) + dv.getUint16(f.off + 28, true);
+    const data = u8.subarray(start, start + f.csize);
+    if (f.method === 0) return td.decode(data);
+    if (f.method !== 8) throw new Error('compresión no soportada');
+    return await new Response(new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).text();
+  };
+  const xml = t => new DOMParser().parseFromString(t, 'application/xml');
+  const textOf = node => Array.from(node.getElementsByTagName('t')).map(t => t.textContent).join('');
+  const shared = [];
+  const ssXml = await read('xl/sharedStrings.xml');
+  if (ssXml) for (const si of xml(ssXml).getElementsByTagName('si')) shared.push(textOf(si));
+  const sheetName = Object.keys(files).filter(n => /^xl\/worksheets\/sheet\d+\.xml$/.test(n))
+    .sort((a, b) => parseInt(a.match(/\d+/)[0], 10) - parseInt(b.match(/\d+/)[0], 10))[0];
+  if (!sheetName) throw new Error('el Excel no tiene hojas');
+  const rows = [];
+  for (const rowEl of xml(await read(sheetName)).getElementsByTagName('row')) {
+    const row = [];
+    for (const c of rowEl.getElementsByTagName('c')) {
+      const letters = (c.getAttribute('r') || '').replace(/\d+/g, '');
+      let idx = 0; for (const ch of letters) idx = idx * 26 + ch.charCodeAt(0) - 64;
+      const t = c.getAttribute('t'), v = c.getElementsByTagName('v')[0];
+      let val = '';
+      if (t === 's') val = shared[parseInt(v ? v.textContent : '-1', 10)] || '';
+      else if (t === 'inlineStr') val = textOf(c);
+      else if (v) val = v.textContent;
+      row[(idx || row.length + 1) - 1] = val;
+    }
+    rows.push(Array.from(row, x => x || ''));
+  }
+  return rows;
+}
+// Busca una columna por nombre de encabezado: primero coincidencia exacta, luego por inicio.
+function colFinder(headRow) {
+  const head = headRow.map(normTxt);
+  return (...names) => {
+    for (const n of names) { const i = head.indexOf(n); if (i >= 0) return i; }
+    return head.findIndex(h => names.some(n => h.startsWith(n)));
+  };
+}
+function cleanText(s) {
+  return (s || '').replace(/\\r\\n|\\n/g, '\n').replace(/\r\n?/g, '\n').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/* =========================================================
+   Oficios RECIBIDOS — seguimiento
+   ---------------------------------------------------------
+   Cada recibido: { id, control, numero, fecha, servicio, remitente, dirigido,
+                    tipo (original|copia), asunto, estatus, respuesta,
+                    workerId (responsable), notas, updatedAt }
+   Estatus: Por revisar → Pendiente → En atención → Atendido,
+            o Solo conocimiento (no requiere respuesta).
+   "respuesta" = número del oficio enviado con el que se contestó.
+   ========================================================= */
+const REC_STATUS = ['por_revisar', 'pendiente', 'en_atencion', 'atendido', 'conocimiento'];
+const REC_LABEL = { por_revisar: 'Por revisar', pendiente: 'Pendiente', en_atencion: 'En atención', atendido: 'Atendido', conocimiento: 'Solo conocimiento' };
+const REC_ALERT_DAYS = 10; // días pendiente o en atención a partir de los cuales se marca "requiere atención"
+const REC_PAGE = 100;      // filas que se muestran de inicio (hay cientos de recibidos)
+let recLimit = REC_PAGE;
+
+function recOpen(r) { return r.estatus === 'pendiente' || r.estatus === 'en_atencion'; }
+function recAlert(r) { const d = ofiDays(r); return recOpen(r) && d !== null && d >= REC_ALERT_DAYS; }
+function recKey(r) { return r.control ? 'c' + String(r.control).trim() + '/' + (r.fecha || '').slice(0, 4) : 'n' + ofiKey(r.numero) + '/' + (r.fecha || ''); }
+function recSort(a, b) { return (b.fecha || '').localeCompare(a.fecha || '') || (parseInt(b.control, 10) || 0) - (parseInt(a.control, 10) || 0); }
+
+/* Enlace automático con los enviados: si el concepto de un oficio enviado
+   (posterior y no cancelado) cita el número de un recibido, ese recibido se
+   marca como Atendido y se anota el oficio de respuesta. */
+// Patrón que encuentra el número tal cual o con espacios distintos ("DG HCG/I/1393/2026"),
+// sin confundirlo con otro más largo ("JOBST/44/2026" no es "JOBST/444/2026").
+function numberPattern(numero) {
+  const chars = (numero || '').toUpperCase().replace(/\s+/g, '').split('')
+    .map(c => c.replace(/[.*+?^${}()|[\]\\\/-]/g, '\\$&'));
+  return new RegExp('(?<![A-Z0-9ÁÉÍÓÚÑ])' + chars.join('\\s*') + '(?![0-9])');
+}
+function autoLinkRecibidos(recs) {
+  const env = (state.oficios || []).filter(o => o.estatus !== 'cancelado' && o.asunto)
+    .map(o => ({ o, text: o.asunto.toUpperCase() }))
+    .sort((a, b) => (a.o.fecha || '').localeCompare(b.o.fecha || ''));
+  if (!env.length) return [];
+  const changed = [];
+  for (const r of recs || []) {
+    if (r.respuesta || r.estatus === 'atendido') continue;
+    const key = (r.numero || '').replace(/\s+/g, '');
+    if (key.length < 7 || !/\d/.test(key) || !key.includes('/')) continue;
+    const re = numberPattern(r.numero);
+    const hit = env.find(x => (!r.fecha || !x.o.fecha || x.o.fecha >= r.fecha) && re.test(x.text));
+    if (hit) { r.respuesta = hit.o.numero; r.estatus = 'atendido'; r.updatedAt = new Date().toISOString(); changed.push(r); }
+  }
+  return changed;
+}
+
+function renderRecibidos() {
+  const all = state.recibidos || [];
+  document.getElementById('ofiCountRec').textContent = all.length ? '(' + all.length + ')' : '';
+  const notice = document.getElementById('recibidosNotice');
+  notice.classList.toggle('hidden', !recibidosUnavailable);
+  if (recibidosUnavailable) {
+    notice.innerHTML = '⚠ Falta crear la tabla de oficios recibidos en Supabase. Corre <b>migracion-recibidos.sql</b> en Supabase → SQL Editor y recarga la página.';
+  }
+
+  const count = s => all.filter(r => r.estatus === s).length;
+  const atencion = all.filter(recAlert).length;
+  document.getElementById('recibidosStats').innerHTML = `
+    ${statCard('Por revisar', count('por_revisar'), 'var(--muted)', 'Sin clasificar todavía')}
+    ${statCard('Pendientes de respuesta', count('pendiente') + count('en_atencion'), 'var(--amber)', count('en_atencion') ? count('en_atencion') + ' ya en atención' : 'Por contestar')}
+    ${statCard('Atendidos', count('atendido'), 'var(--green)', count('conocimiento') + ' solo de conocimiento')}
+    ${statCard('Requieren atención', atencion, 'var(--red)', atencion ? 'Más de ' + REC_ALERT_DAYS + ' días sin contestar' : 'Nada rezagado 🎉')}
+  `;
+
+  const fw = document.getElementById('recFilterWorker');
+  const cur = fw.value;
+  fw.innerHTML = '<option value="">Todos los responsables</option><option value="_none">Sin responsable</option>' +
+    state.workers.map(w => `<option value="${w.id}">${escapeHtml(w.name)}</option>`).join('');
+  fw.value = cur;
+
+  const sFilter = document.getElementById('recFilterStatus').value;
+  const wFilter = fw.value;
+  const q = normTxt(document.getElementById('recFilterSearch').value);
+  let list = all.slice();
+  if (sFilter === 'abiertos') list = list.filter(recOpen);
+  else if (sFilter === 'atencion') list = list.filter(recAlert);
+  else if (sFilter) list = list.filter(r => r.estatus === sFilter);
+  if (wFilter === '_none') list = list.filter(r => !workerById(r.workerId));
+  else if (wFilter) list = list.filter(r => r.workerId === wFilter);
+  if (q) list = list.filter(r => normTxt([r.numero, r.control, r.remitente, r.servicio, r.dirigido, r.asunto, r.respuesta, r.notas].join(' ')).includes(q));
+  list.sort(recSort);
+
+  const el = document.getElementById('recibidosList');
+  if (!list.length) {
+    el.innerHTML = emptyBox(all.length ? 'Ningún oficio recibido coincide con el filtro.' : 'Aún no hay oficios recibidos. Usa “Importar archivo” para cargar tu Excel.');
+    return;
+  }
+  const shown = list.slice(0, recLimit);
+  el.innerHTML = `<div class="ofi-wrap"><table class="ofi-table">
+    <thead><tr><th>Oficio</th><th>Fecha</th><th>Remitente / servicio</th><th>Asunto</th><th>Responsable</th><th>Estatus</th><th>Sin contestar</th></tr></thead>
+    <tbody>${shown.map(recRow).join('')}</tbody>
+  </table></div>
+  <div class="muted" style="margin-top:10px">Mostrando ${shown.length} de ${list.length}${list.length !== all.length ? ' (filtrados de ' + all.length + ')' : ''}</div>
+  ${list.length > shown.length ? `<div class="more-row"><button class="btn" id="recMore">Mostrar ${Math.min(REC_PAGE, list.length - shown.length)} más</button></div>` : ''}`;
+}
+
+function recRow(r) {
+  const w = workerById(r.workerId);
+  const d = ofiDays(r);
+  const late = recAlert(r);
+  let days = '—';
+  if (r.estatus === 'atendido') days = '✓';
+  else if (recOpen(r) && d !== null) days = d <= 0 ? 'hoy' : d + (d === 1 ? ' día' : ' días');
+  const sub = [r.control ? 'Control ' + escapeHtml(r.control) : '', r.tipo === 'copia' ? 'Copia' : ''].filter(Boolean).join(' · ');
+  return `<tr data-rec="${r.id}" class="${late ? 'alert' : ''}">
+    <td class="rec-num">${escapeHtml(r.numero)}${sub ? `<div class="ofi-sub" style="font-weight:400">${sub}</div>` : ''}</td>
+    <td class="ofi-date">${fmtDate(r.fecha)}</td>
+    <td class="rec-from">${escapeHtml(r.remitente) || '<span class="ofi-sub">—</span>'}${r.servicio ? `<div class="ofi-sub">${escapeHtml(r.servicio)}</div>` : ''}</td>
+    <td class="ofi-concept">${r.asunto ? `<div class="ofi-clamp" title="Clic para ver el asunto completo">${escapeHtml(r.asunto)}</div>` : '<span class="ofi-sub">Sin asunto</span>'}</td>
+    <td>${w ? escapeHtml(w.name) : '<span class="ofi-sub">—</span>'}</td>
+    <td><select class="ofi-status ${r.estatus}" title="Cambiar estatus">
+      ${REC_STATUS.map(s => `<option value="${s}" ${s === r.estatus ? 'selected' : ''}>${REC_LABEL[s]}</option>`).join('')}
+    </select>${r.respuesta ? `<div class="ofi-reply" title="Oficio con el que se contestó">↩ ${escapeHtml(r.respuesta)}</div>` : ''}</td>
+    <td class="ofi-days ${late ? 'late' : ''}">${days}</td>
+  </tr>`;
+}
+
+function recibidoForm(rec) {
+  const today = new Date(); const pad = n => String(n).padStart(2, '0');
+  const todayIso = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
+  const r = rec || { control: '', numero: '', fecha: todayIso, servicio: '', remitente: '', dirigido: '', tipo: 'original', asunto: '', estatus: 'pendiente', respuesta: '', workerId: '', notas: '' };
+  openModal(rec ? 'Editar oficio recibido' : 'Nuevo oficio recibido', `
+    <div class="field-row">
+      <div class="field">
+        <label>Número de oficio *</label>
+        <input id="r-numero" value="${escapeHtml(r.numero)}" placeholder="Ej. DG HCG/I/1393/2026" />
+      </div>
+      <div class="field">
+        <label>Fecha de recepción</label>
+        <input type="date" id="r-fecha" value="${r.fecha || ''}" />
+      </div>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label>Remitente</label>
+        <input id="r-remitente" value="${escapeHtml(r.remitente || '')}" placeholder="¿Quién lo firma?" />
+      </div>
+      <div class="field">
+        <label>Servicio / área de origen</label>
+        <input id="r-servicio" value="${escapeHtml(r.servicio || '')}" />
+      </div>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label>Dirigido a</label>
+        <input id="r-dirigido" value="${escapeHtml(r.dirigido || '')}" />
+      </div>
+      <div class="field">
+        <label>Tipo</label>
+        <select id="r-tipo">
+          <option value="original" ${r.tipo !== 'copia' ? 'selected' : ''}>Original</option>
+          <option value="copia" ${r.tipo === 'copia' ? 'selected' : ''}>Copia</option>
+        </select>
+      </div>
+    </div>
+    <div class="field">
+      <label>Asunto</label>
+      <textarea id="r-asunto" style="min-height:110px" placeholder="¿Qué solicita o informa?">${escapeHtml(r.asunto || '')}</textarea>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label>Estatus</label>
+        <select id="r-estatus">${REC_STATUS.map(s => `<option value="${s}" ${s === r.estatus ? 'selected' : ''}>${REC_LABEL[s]}</option>`).join('')}</select>
+      </div>
+      <div class="field">
+        <label>Responsable de atenderlo</label>
+        <select id="r-worker"><option value="">Sin asignar</option>${state.workers.map(w => `<option value="${w.id}" ${w.id === r.workerId ? 'selected' : ''}>${escapeHtml(w.name)}</option>`).join('')}</select>
+      </div>
+    </div>
+    <div class="field">
+      <label>Se contestó con el oficio <span class="muted" style="font-weight:400">— al llenarlo se marca como Atendido</span></label>
+      <input id="r-respuesta" list="r-enviados" value="${escapeHtml(r.respuesta || '')}" placeholder="Ej. CGC/549/2026" />
+      <datalist id="r-enviados">${(state.oficios || []).slice().sort(ofiSort).map(o => `<option value="${escapeHtml(o.numero)}"></option>`).join('')}</datalist>
+    </div>
+    <div class="field">
+      <label>Notas de seguimiento</label>
+      <textarea id="r-notas" placeholder="Ej. Se turnó a calidad el 12/11.">${escapeHtml(r.notas || '')}</textarea>
+    </div>
+    <div class="modal-actions">
+      ${rec ? `<button class="btn danger" id="r-del">Eliminar</button>` : '<span></span>'}
+      <div class="right">
+        <button class="btn" id="r-cancel">Cancelar</button>
+        <button class="btn primary" id="r-save">Guardar</button>
+      </div>
+    </div>
+  `);
+  document.getElementById('r-cancel').onclick = closeModal;
+  document.getElementById('r-save').onclick = async () => {
+    const numero = document.getElementById('r-numero').value.trim();
+    if (!numero) return toast('El número de oficio es obligatorio', true);
+    const respuesta = document.getElementById('r-respuesta').value.trim();
+    let estatus = document.getElementById('r-estatus').value;
+    // Si se acaba de anotar la respuesta, el oficio queda atendido.
+    if (respuesta && !(r.respuesta || '') && estatus !== 'conocimiento') estatus = 'atendido';
+    const data = {
+      numero,
+      fecha: document.getElementById('r-fecha').value,
+      remitente: document.getElementById('r-remitente').value.trim(),
+      servicio: document.getElementById('r-servicio').value.trim(),
+      dirigido: document.getElementById('r-dirigido').value.trim(),
+      tipo: document.getElementById('r-tipo').value,
+      asunto: document.getElementById('r-asunto').value.trim(),
+      estatus, respuesta,
+      workerId: document.getElementById('r-worker').value,
+      notas: document.getElementById('r-notas').value.trim(),
+      updatedAt: new Date().toISOString(),
+    };
+    const before = rec ? { ...rec } : null;
+    let target;
+    if (rec) { Object.assign(rec, data); target = rec; }
+    else { target = { id: uid(), control: '', ...data }; state.recibidos.push(target); }
+    try {
+      await DB.saveRecibidos([target]);
+      closeModal(); renderAll(); toast('Oficio recibido guardado');
+    } catch (e) {
+      if (before) Object.assign(rec, before); else state.recibidos = state.recibidos.filter(x => x !== target);
+      toast('Error al guardar: ' + (e.message || e), true);
+    }
+  };
+  if (rec) {
+    document.getElementById('r-del').onclick = async () => {
+      if (!confirm(`¿Eliminar el oficio recibido ${rec.numero}?`)) return;
+      try {
+        state.recibidos = state.recibidos.filter(x => x.id !== rec.id);
+        await DB.deleteRecibido(rec.id);
+        closeModal(); renderAll(); toast('Oficio recibido eliminado');
+      } catch (e) { state.recibidos.push(rec); renderAll(); toast('Error al eliminar: ' + (e.message || e), true); }
+    };
+  }
+}
+
+/* ----- Importar recibidos desde Excel o CSV -----
+   Columnas reconocidas: N. control, Oficio, Fecha, Servicio, Remitente,
+   Dirigido, Tipo (ORIGINAL/COPIA), Asunto. Si el N. control ya existe se
+   actualizan sus datos SIN tocar el estatus, la respuesta, el responsable
+   ni las notas que ya hayas capturado. */
+async function importRecibidos(file) {
+  let rows;
+  try { rows = await readTableFile(file); } catch (e) { return toast('No se pudo leer el archivo: ' + (e.message || e), true); }
+  if (rows.length < 2) return toast('El archivo no tiene oficios', true);
+  const col = colFinder(rows[0]);
+  const cCtl = col('n. control', 'no. control', 'control');
+  const cNum = col('oficio', 'numero', 'folio');
+  const cFecha = col('fecha'), cServ = col('servicio', 'centro', 'area'), cRem = col('remitente');
+  const cDir = col('dirigido', 'destinatario'), cAsunto = col('asunto', 'concepto');
+  const head = rows[0].map(normTxt);
+  const cTipo = head.indexOf('tipo'); // exacto: "Tipo docu." es otra columna
+  if (cNum < 0 || cRem < 0) return toast('El archivo necesita las columnas "Oficio" y "Remitente"', true);
+
+  const get = (r, c) => c >= 0 ? (r[c] || '').trim() : '';
+  const byKey = new Map(state.recibidos.map(r => [recKey(r), r]));
+  const changed = [], added = [], backups = new Map();
+  let nuevos = 0, actualizados = 0, iguales = 0, invalidos = 0;
+  for (const r of rows.slice(1)) {
+    const numero = get(r, cNum);
+    if (!numero) { if (!/^total/i.test((r[0] || '').trim())) invalidos++; continue; }
+    const src = {
+      control: get(r, cCtl), numero, fecha: cFecha >= 0 ? parseOfiDate(r[cFecha]) : '',
+      servicio: get(r, cServ), remitente: get(r, cRem).replace(/\s+/g, ' '), dirigido: get(r, cDir).replace(/\s+/g, ' '),
+      tipo: /copia/i.test(get(r, cTipo)) ? 'copia' : 'original',
+      asunto: cAsunto >= 0 ? cleanText(r[cAsunto]) : '',
+    };
+    const ex = byKey.get(recKey(src));
+    if (ex) {
+      if (Object.keys(src).every(k => (ex[k] || '') === (src[k] || ''))) { iguales++; continue; }
+      backups.set(ex, { ...ex });
+      Object.assign(ex, src, { updatedAt: new Date().toISOString() });
+      changed.push(ex); actualizados++;
+    } else {
+      const o = { id: uid(), ...src, estatus: src.tipo === 'copia' ? 'conocimiento' : 'por_revisar',
+        respuesta: '', workerId: '', notas: '', updatedAt: new Date().toISOString() };
+      byKey.set(recKey(o), o); added.push(o); changed.push(o); nuevos++;
+    }
+  }
+  if (!changed.length) return toast(invalidos ? `Sin cambios (${invalidos} fila(s) no válidas)` : 'Sin cambios: todo ya estaba al día');
+  // Los nuevos que ya fueron contestados por un oficio enviado quedan como Atendidos.
+  const linked = autoLinkRecibidos(added).length;
+  state.recibidos.push(...added);
+  try {
+    await DB.saveRecibidos(changed);
+    recLimit = REC_PAGE;
+    renderAll();
+    toast(`${nuevos} nuevo(s), ${actualizados} actualizado(s)` + (iguales ? `, ${iguales} sin cambios` : '') +
+      (linked ? ` · ${linked} ya contestado(s)` : '') + (invalidos ? ` · ${invalidos} fila(s) omitidas` : ''));
+  } catch (e) {
+    state.recibidos = state.recibidos.filter(o => !added.includes(o));
+    backups.forEach((old, o) => Object.assign(o, old));
+    renderAll();
+    toast('Error al importar: ' + (e.message || e), true);
+  }
+}
+
+/* ----- Enviados / Recibidos: selector de apartado ----- */
+const OFI_TAB_KEY = 'panel_oficios_tab';
+function switchOfiTab(tab) {
+  if (tab !== 'recibidos') tab = 'enviados';
+  document.querySelectorAll('#ofiSeg .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.ofiTab === tab));
+  document.getElementById('ofiPaneEnviados').classList.toggle('hidden', tab !== 'enviados');
+  document.getElementById('ofiPaneRecibidos').classList.toggle('hidden', tab !== 'recibidos');
+  try { localStorage.setItem(OFI_TAB_KEY, tab); } catch (_) {}
+}
+document.querySelectorAll('#ofiSeg .seg-btn').forEach(b => b.onclick = () => switchOfiTab(b.dataset.ofiTab));
+switchOfiTab(localStorage.getItem(OFI_TAB_KEY));
+
+document.getElementById('btnAddRecibido').onclick = () => recibidoForm(null);
+document.getElementById('btnImportRecibidos').onclick = () => document.getElementById('fileRecibidos').click();
+document.getElementById('fileRecibidos').onchange = e => { if (e.target.files[0]) importRecibidos(e.target.files[0]); e.target.value = ''; };
+['recFilterStatus', 'recFilterWorker', 'recFilterSearch'].forEach(id =>
+  document.getElementById(id).addEventListener('input', () => { recLimit = REC_PAGE; renderRecibidos(); }));
+document.getElementById('recibidosList').addEventListener('click', e => {
+  if (e.target.id === 'recMore') { recLimit += REC_PAGE; renderRecibidos(); return; }
+  if (e.target.closest('select')) return;
+  const t = e.target.closest('[data-rec]');
+  if (t) { const r = state.recibidos.find(x => x.id === t.dataset.rec); if (r) recibidoForm(r); }
+});
+document.getElementById('recibidosList').addEventListener('change', async e => {
+  if (!e.target.classList.contains('ofi-status')) return;
+  const r = state.recibidos.find(x => x.id === e.target.closest('[data-rec]').dataset.rec);
+  if (!r) return;
+  const prev = r.estatus, prevAt = r.updatedAt;
+  r.estatus = e.target.value; r.updatedAt = new Date().toISOString();
+  try {
+    await DB.saveRecibidos([r]);
+    renderRecibidos(); toast(`${r.numero}: ${REC_LABEL[r.estatus]}`);
+  } catch (err) {
+    r.estatus = prev; r.updatedAt = prevAt; renderRecibidos();
     toast('Error al guardar: ' + (err.message || err), true);
   }
 });
@@ -1136,6 +1592,7 @@ function renderAll() {
   renderWorkers();
   renderActivities();
   renderOficios();
+  renderRecibidos();
 }
 
 document.querySelectorAll('.tab').forEach(t => t.onclick = () => switchView(t.dataset.view));

@@ -97,29 +97,63 @@
     <section id="view-oficios" class="view hidden">
       <div class="view-head">
         <h2>Seguimiento de oficios</h2>
-        <div class="head-actions">
-          <button id="btnImportOficios" class="btn" title="Cargar o actualizar oficios desde un archivo CSV">⬆ Importar CSV</button>
-          <button id="btnAddOficio" class="btn primary">+ Nuevo oficio</button>
-          <input type="file" id="fileOficios" accept=".csv,text/csv" hidden />
+        <div class="seg" id="ofiSeg">
+          <button class="seg-btn active" data-ofi-tab="enviados">Enviados <span id="ofiCountEnv"></span></button>
+          <button class="seg-btn" data-ofi-tab="recibidos">Recibidos <span id="ofiCountRec"></span></button>
         </div>
       </div>
-      <div id="oficiosNotice" class="notice hidden"></div>
-      <div class="stats-grid" id="oficiosStats"></div>
-      <div class="filters">
-        <select id="ofiFilterStatus">
-          <option value="">Todos los estatus</option>
-          <option value="abiertos">Abiertos (sin acuse)</option>
-          <option value="atencion">Requieren atención</option>
-          <option value="en_firma">En firma</option>
-          <option value="firmado">Firmado</option>
-          <option value="enviado">Enviado</option>
-          <option value="acuse">Acuse</option>
-          <option value="cancelado">Cancelado</option>
-        </select>
-        <select id="ofiFilterWorker"><option value="">Todos los responsables</option></select>
-        <input type="search" id="ofiFilterSearch" placeholder="Buscar número, concepto o destinatario…" />
+
+      <!-- ----- Enviados ----- -->
+      <div id="ofiPaneEnviados">
+        <div class="pane-actions">
+          <button id="btnImportOficios" class="btn" title="Cargar o actualizar oficios enviados desde un archivo CSV o Excel">⬆ Importar archivo</button>
+          <button id="btnAddOficio" class="btn primary">+ Nuevo oficio</button>
+          <input type="file" id="fileOficios" accept=".csv,.xlsx,text/csv" hidden />
+        </div>
+        <div id="oficiosNotice" class="notice hidden"></div>
+        <div class="stats-grid" id="oficiosStats"></div>
+        <div class="filters">
+          <select id="ofiFilterStatus">
+            <option value="">Todos los estatus</option>
+            <option value="abiertos">Abiertos (sin acuse)</option>
+            <option value="atencion">Requieren atención</option>
+            <option value="en_firma">En firma</option>
+            <option value="firmado">Firmado</option>
+            <option value="enviado">Enviado</option>
+            <option value="acuse">Acuse</option>
+            <option value="cancelado">Cancelado</option>
+          </select>
+          <select id="ofiFilterWorker"><option value="">Todos los responsables</option></select>
+          <input type="search" id="ofiFilterSearch" placeholder="Buscar número, concepto o destinatario…" />
+        </div>
+        <div id="oficiosList"></div>
       </div>
-      <div id="oficiosList"></div>
+
+      <!-- ----- Recibidos ----- -->
+      <div id="ofiPaneRecibidos" class="hidden">
+        <div class="pane-actions">
+          <button id="btnImportRecibidos" class="btn" title="Cargar o actualizar oficios recibidos desde un archivo Excel o CSV">⬆ Importar archivo</button>
+          <button id="btnAddRecibido" class="btn primary">+ Nuevo recibido</button>
+          <input type="file" id="fileRecibidos" accept=".xlsx,.csv,text/csv" hidden />
+        </div>
+        <div id="recibidosNotice" class="notice hidden"></div>
+        <div class="stats-grid" id="recibidosStats"></div>
+        <div class="filters">
+          <select id="recFilterStatus">
+            <option value="">Todos los estatus</option>
+            <option value="abiertos">Pendientes y en atención</option>
+            <option value="atencion">Requieren atención</option>
+            <option value="por_revisar">Por revisar</option>
+            <option value="pendiente">Pendiente</option>
+            <option value="en_atencion">En atención</option>
+            <option value="atendido">Atendido</option>
+            <option value="conocimiento">Solo conocimiento</option>
+          </select>
+          <select id="recFilterWorker"><option value="">Todos los responsables</option></select>
+          <input type="search" id="recFilterSearch" placeholder="Buscar número, remitente, servicio o asunto…" />
+        </div>
+        <div id="recibidosList"></div>
+      </div>
     </section>
 
   </main>

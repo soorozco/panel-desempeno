@@ -65,6 +65,25 @@ create table if not exists public.oficios (
 );
 create index if not exists oficios_estatus_idx on public.oficios(estatus);
 
+-- ---------- Tabla de oficios recibidos (seguimiento) ----------
+create table if not exists public.oficios_recibidos (
+  id            text primary key,
+  control       text default '',             -- N. control de la oficialía
+  numero        text not null,               -- número del oficio recibido
+  fecha         text,                        -- fecha de recepción 'YYYY-MM-DD'
+  servicio      text default '',             -- área de origen
+  remitente     text default '',
+  dirigido      text default '',
+  tipo          text default 'original',     -- original | copia
+  asunto        text default '',
+  estatus       text default 'por_revisar',  -- por_revisar | pendiente | en_atencion | atendido | conocimiento
+  respuesta     text default '',             -- oficio enviado con el que se contestó
+  worker_id     text references public.workers(id) on delete set null, -- responsable
+  notas         text default '',
+  updated_at    text
+);
+create index if not exists oficios_recibidos_estatus_idx on public.oficios_recibidos(estatus);
+
 -- =========================================================
 --  Seguridad (RLS) — Control de accesos
 --  Modelo elegido: "Yo + supervisores".
@@ -89,6 +108,15 @@ create policy "workers_auth_all" on public.workers
 alter table public.oficios enable row level security;
 drop policy if exists "oficios_auth_all" on public.oficios;
 create policy "oficios_auth_all" on public.oficios
+  for all
+  to authenticated
+  using (true)
+  with check (true);
+
+-- Oficios recibidos: acceso total para usuarios autenticados
+alter table public.oficios_recibidos enable row level security;
+drop policy if exists "oficios_recibidos_auth_all" on public.oficios_recibidos;
+create policy "oficios_recibidos_auth_all" on public.oficios_recibidos
   for all
   to authenticated
   using (true)
