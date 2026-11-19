@@ -494,6 +494,7 @@ const modalTitle = document.getElementById('modalTitle');
 const modalBody = document.getElementById('modalBody');
 
 function openModal(title, html) {
+  modal.querySelector('.modal').classList.remove('wide');
   modalTitle.textContent = title;
   modalBody.innerHTML = html;
   modal.classList.remove('hidden');
@@ -907,6 +908,24 @@ function renderOficios() {
   <div class="muted" style="margin-top:10px">${list.length} de ${all.length} oficio(s)</div>`;
 }
 
+// Texto largo en la tabla: dos líneas y un "ver más" que lo despliega completo ahí mismo.
+function clampHtml(text) {
+  const long = text.length > 150 || text.includes('\n');
+  return `<div class="ofi-clamp">${escapeHtml(text)}</div>` + (long ? '<button type="button" class="link-btn ofi-more">ver más</button>' : '');
+}
+function toggleClamp(btn) {
+  const box = btn.previousElementSibling;
+  const open = box.classList.toggle('open');
+  btn.textContent = open ? 'ver menos' : 'ver más';
+}
+// El cuadro de texto del formulario crece para mostrar todo el contenido.
+function autoGrow(el) {
+  if (!el) return;
+  const fit = () => { el.style.height = 'auto'; el.style.height = (el.scrollHeight + 4) + 'px'; };
+  el.addEventListener('input', fit);
+  fit();
+}
+
 function ofiRow(o) {
   const w = workerById(o.workerId);
   const d = ofiDays(o);
@@ -917,7 +936,7 @@ function ofiRow(o) {
   return `<tr data-ofi="${o.id}" class="${late ? 'alert' : ''}">
     <td class="ofi-num">${escapeHtml(o.numero)}</td>
     <td class="ofi-date">${fmtDate(o.fecha)}</td>
-    <td class="ofi-concept">${o.asunto ? `<div class="ofi-clamp" title="Clic para ver el concepto completo">${escapeHtml(o.asunto)}</div>` : '<span class="ofi-sub">Sin concepto</span>'}${o.destinatario ? `<div class="ofi-sub">→ ${escapeHtml(o.destinatario)}</div>` : ''}</td>
+    <td class="ofi-concept">${o.asunto ? clampHtml(o.asunto) : '<span class="ofi-sub">Sin concepto</span>'}${o.destinatario ? `<div class="ofi-sub">→ ${escapeHtml(o.destinatario)}</div>` : ''}</td>
     <td>${w ? escapeHtml(w.name) : '<span class="ofi-sub">—</span>'}</td>
     <td><select class="ofi-status ${o.estatus}" title="Cambiar estatus">
       ${OFI_STATUS.map(s => `<option value="${s}" ${s === o.estatus ? 'selected' : ''}>${OFI_LABEL[s]}</option>`).join('')}
@@ -971,6 +990,8 @@ function oficioForm(oficio) {
       </div>
     </div>
   `);
+  modal.querySelector('.modal').classList.add('wide'); // más ancho: el texto del oficio es largo
+  autoGrow(document.getElementById('o-asunto'));
   document.getElementById('o-cancel').onclick = closeModal;
   document.getElementById('o-save').onclick = async () => {
     const numero = document.getElementById('o-numero').value.trim();
@@ -1116,6 +1137,7 @@ document.getElementById('fileOficios').onchange = e => { if (e.target.files[0]) 
 ['ofiFilterStatus', 'ofiFilterWorker', 'ofiFilterSearch'].forEach(id =>
   document.getElementById(id).addEventListener('input', renderOficios));
 document.getElementById('oficiosList').addEventListener('click', e => {
+  if (e.target.classList.contains('ofi-more')) return toggleClamp(e.target);
   if (e.target.closest('select')) return; // el selector de estatus no abre el detalle
   const t = e.target.closest('[data-ofi]');
   if (t) { const o = state.oficios.find(x => x.id === t.dataset.ofi); if (o) oficioForm(o); }
@@ -1312,7 +1334,7 @@ function recRow(r) {
     <td class="rec-num">${escapeHtml(r.numero)}${sub ? `<div class="ofi-sub" style="font-weight:400">${sub}</div>` : ''}</td>
     <td class="ofi-date">${fmtDate(r.fecha)}</td>
     <td class="rec-from">${escapeHtml(r.remitente) || '<span class="ofi-sub">—</span>'}${r.servicio ? `<div class="ofi-sub">${escapeHtml(r.servicio)}</div>` : ''}</td>
-    <td class="ofi-concept">${r.asunto ? `<div class="ofi-clamp" title="Clic para ver el asunto completo">${escapeHtml(r.asunto)}</div>` : '<span class="ofi-sub">Sin asunto</span>'}</td>
+    <td class="ofi-concept">${r.asunto ? clampHtml(r.asunto) : '<span class="ofi-sub">Sin asunto</span>'}</td>
     <td>${w ? escapeHtml(w.name) : '<span class="ofi-sub">—</span>'}</td>
     <td><select class="ofi-status ${r.estatus}" title="Cambiar estatus">
       ${REC_STATUS.map(s => `<option value="${s}" ${s === r.estatus ? 'selected' : ''}>${REC_LABEL[s]}</option>`).join('')}
@@ -1390,6 +1412,8 @@ function recibidoForm(rec) {
       </div>
     </div>
   `);
+  modal.querySelector('.modal').classList.add('wide'); // más ancho: el texto del oficio es largo
+  autoGrow(document.getElementById('r-asunto'));
   document.getElementById('r-cancel').onclick = closeModal;
   document.getElementById('r-save').onclick = async () => {
     const numero = document.getElementById('r-numero').value.trim();
@@ -1515,6 +1539,7 @@ document.getElementById('fileRecibidos').onchange = e => { if (e.target.files[0]
   document.getElementById(id).addEventListener('input', () => { recLimit = REC_PAGE; renderRecibidos(); }));
 document.getElementById('recibidosList').addEventListener('click', e => {
   if (e.target.id === 'recMore') { recLimit += REC_PAGE; renderRecibidos(); return; }
+  if (e.target.classList.contains('ofi-more')) return toggleClamp(e.target);
   if (e.target.closest('select')) return;
   const t = e.target.closest('[data-rec]');
   if (t) { const r = state.recibidos.find(x => x.id === t.dataset.rec); if (r) recibidoForm(r); }
